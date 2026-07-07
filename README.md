@@ -2,7 +2,7 @@
 
 ### Noncollinear Electronic Structure Theory
 
-NEST is an open-source framework for developing noncollinear electronic structure methods.
+NEST is an open-source framework for developing methods based on noncollinear electronic structure theory.
 
 ## Features
 
@@ -24,17 +24,18 @@ NEST is an open-source framework for developing noncollinear electronic structur
 
 ...
 
+## License
+
+NEST is released under the Apache License 2.0.
+
 ## Citation
 
 If you use NEST in your research, please cite the relevant publication(s) listed below.
 
-### Noncollinear density functional theory
+### Noncollinear density functional theory (Foundation)
 
-- Z. Pu, H. Li, N. Zhang, H. Jiang, Y. Gao, Y. Xiao*, Q. Sun, Y. Zhang, S. Shao, Noncollinear density functional theory, Phys. Rev. Res. 5, 013036 (2023).
+- Z. Pu, H. Li, N. Zhang, H. Jiang, Y. Gao, Y. Xiao, Q. Sun, Y. Zhang, S. Shao, Noncollinear density functional theory, Phys. Rev. Res. 5, 013036 (2023).
 
-### The multicollinear approach (Review article)
-
-- T. Wang, Z. Pu, H. Li, Q. Sun, Y. Gao, Y. Xiao*, From collinear to noncollinear spin density functionals: the multicollinear approach, WIREs Comput. Mol. Sci. 16, e70063 (2026).
   
 ### Noncollinear SF-TDDFT
 
@@ -52,6 +53,3 @@ If you use NEST in your research, please cite the relevant publication(s) listed
 
 - Manuscript in preparation.
 
-## License
-
-NEST is released under the Apache License 2.0.
