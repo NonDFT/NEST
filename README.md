@@ -9,14 +9,14 @@ NEST is an open-source framework for developing noncollinear electronic structur
 - Noncollinear spin-flip TDDFT (SF-TDDFT)
 
   Within the noncollinear TDDFT formalism, SF-TDDFT and conventional spin-conserving TDDFT naturally emerge as two decoupled sectors for collinear reference states.
-  
+
   - Energy
   - Analytic gradients
   - Analytic nonadiabatic derivative couplings (NADC)
 
 - Noncollinear tensor TDA (NT-TDA)
-  
-  NT-TDA is a unified, spin-consistent framework for describing spin-conserving and spin-flip excitations from open-shell references without spin contamination.
+
+  NT-TDA is a spin-consistent extension of noncollinear TDDFT that provides a unified description of spin-conserving and spin-flip excitations. For an open-shell reference state with total spin S, it can describe target states with total spins S−1 (except for S = 1/2), S, and S+1. All resulting states are free from spin contamination.
 
   - Energy
     
