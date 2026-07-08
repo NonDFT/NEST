@@ -6,19 +6,28 @@ NEST is an open-source framework for developing methods based on noncollinear el
 
 ## Features
 
-- Noncollinear spin-flip TDDFT (SF-TDDFT)
+- Noncollinear DFT
+
+  A general framework for extending collinear density functionals to noncollinear systems using the multicollinear approach.
+
+- Noncollinear TDDFT
+
+  A general TDDFT framework applicable to both two-component and four-component noncollinear theories.
+
+- Noncollinear Spin-Flip TDDFT (SF-TDDFT)
 
   Within the noncollinear TDDFT formalism, SF-TDDFT and conventional spin-conserving TDDFT naturally emerge as two decoupled sectors for collinear reference states.
 
-  - Energy
   - Analytic gradients
   - Analytic nonadiabatic derivative couplings (NADC)
+  - Spin-orbit coupling (SOC) *(under development)*
 
-- Noncollinear tensor TDA (NT-TDA)
+- Noncollinear Tensor TDA (NT-TDA)
 
-  NT-TDA is a spin-consistent extension of noncollinear TDDFT that provides a unified description of spin-conserving and spin-flip excitations. For an open-shell reference state with total spin S, it can describe target states with total spins S−1 (except for S = 1/2), S, and S+1. All resulting states are free from spin contamination.
+  NT-TDA is a spin-consistent extension of noncollinear TDDFT that provides a unified treatment of spin-conserving and spin-flip excitations. For an open-shell reference state with total spin S, it can describe target states with total spins S−1 (except for S = 1/2), S, and S+1. All resulting states are free from spin contamination.
 
-  - Energy
+  - Analytic gradients *(under development)*
+  - Spin-orbit coupling (SOC) *(under development)*
     
 ## Installation
 
@@ -32,24 +41,25 @@ NEST is released under the Apache License 2.0.
 
 If you use NEST in your research, please cite the relevant publication(s) listed below.
 
-### Noncollinear density functional theory (Foundation)
+### Noncollinear DFT
 
-- Z. Pu, H. Li, N. Zhang, H. Jiang, Y. Gao, Y. Xiao, Q. Sun, Y. Zhang, S. Shao, Noncollinear density functional theory, Phys. Rev. Res. 5, 013036 (2023).
+- Multicollinear approach (PRR, 2023)
+- Matrix representation (WIREs, 2026)
+- Nonlocal functionals (JCP, 2025)
 
-  
+### Noncollinear TDDFT
+
+- Noncollinear TDDFT and noncollinear SF-TDDFT (JCTC, 2023)
+- Real-time noncollinear TDDFT (JCTC, 2024)
+
 ### Noncollinear SF-TDDFT
 
-- H. Li, Z. Pu, Q. Sun, Y. Q. Gao, Y. Xiao, Non-collinear and spin-flip TDDFT in multi-collinear approach, J. Chem. Theory Comput. 19, 2270 (2023).
+- Analytic gradients (JCTC, 2025)
+- Zero-excitation-energy theorem (JCTC, 2025)
+- Conical intersections and spin crossings (JCTC, 2025)
+- Analytic nonadiabatic derivative couplings (JCTC, 2026)
 
-### Analytic gradients for noncollinear SF-TDDFT
-
-- H. Li, Q. Sun, Y. Gao, Y. Xiao, Analytic gradient for spin-flip TDDFT using noncollinear functionals in the multicollinear approach, J. Chem. Theory Comput. 21, 3010 (2025).
-
-### Analytic NADC for noncollinear SF-TDDFT
-
-- Y. Jing, W. Qin, C. Fan, T. Wang, Z. Pu, Q. Sun, Y. Q. Gao, Y. Xiao, Analytic nonadiabatic derivative couplings using noncollinear spin-flip TDDFT, J. Chem. Theory Comput. 22, 6076 (2026).
-
-### NT-TDA
+### Noncollinear Tensor TDA (NT-TDA)
 
 - Manuscript in preparation.
 
