@@ -31,7 +31,34 @@ NEST is an open-source framework for developing methods based on noncollinear el
     
 ## Installation
 
-...
+From the repository root, install NEST and its runtime dependencies in editable
+mode:
+
+```bash
+python -m pip install -e .
+```
+
+Install the test and lint tools for development:
+
+```bash
+python -m pip install -e ".[dev]"
+```
+
+Importing a feature module registers its methods on the corresponding PySCF
+mean-field objects:
+
+```python
+from pyscf import gto
+from nest import nttda, sftda
+
+mol = gto.M(atom="H 0 0 0; H 0 0 1", spin=2)
+uks = mol.UKS(xc="HF")
+roks = mol.ROKS(xc="HF")
+sf = uks.SFTDA()
+nt = roks.NTTDA()
+```
+
+See [`examples`](examples) for complete calculations.
 
 ## License
 
@@ -62,4 +89,3 @@ If you use NEST in your research, please cite the relevant publication(s) listed
 ### Noncollinear Tensor TDA (NT-TDA)
 
 - Manuscript in preparation.
-
