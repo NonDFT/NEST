@@ -27,7 +27,7 @@ from pyscf.tdscf.uhf import TDBase
 from pyscf.dft.gen_grid import NBINS
 from pyscf import __config__
 from pyscf.dft.numint import _scale_ao_sparse, _dot_ao_ao_sparse, _dot_ao_dm_sparse, _contract_rho_sparse
-from pyscf.tdscf._lr_eig import eigh as lr_eigh
+from nest.sftda._lr_eig import eigh as lr_eigh
 from pyscf import symm
 from pyscf.data import nist
 
