@@ -2,7 +2,7 @@
 
 ### Added
 
-- Initial public release of NEST.
+- First public release of the NEST electronic structure package, built on top of the PySCF framework.
 
 - `nest.sftda`: Noncollinear spin-flip TDA and TDDFT (SF-TDA/SF-TDDFT) based on
   unrestricted Kohn–Sham references. Supports collinear (`col`) and multicollinear
@@ -10,8 +10,8 @@
   on PySCF UKS/UHF objects.
 
 - `nest.nttda`: Noncollinear Tensor TDA (NT-TDA) based on ROKS references.
-  Supports spin-conserving (ΔS = 0) and spin-flip (ΔS = ±1) excitations free from
-  spin contamination. Registers `NTTDA` on PySCF ROKS objects.
+  Provides spin-pure excited states for ΔS = 0 and ±1 excitations. 
+  Registers `NTTDA` on PySCF ROKS objects.
 
 - `nest.grad`: Analytic nuclear gradients for SF-TDA and SF-TDDFT.
 
@@ -20,4 +20,4 @@
 
 - GitHub Actions CI: lint with ruff and test suite via pytest.
 
-- Apache License 2.0.
+- Licensed under the Apache License 2.0.
