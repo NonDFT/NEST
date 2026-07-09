@@ -3,6 +3,7 @@
 ### Noncollinear Electronic Structure Theory
 
 NEST is an open-source framework for developing methods based on noncollinear electronic structure theory.
+It is built on top of the PySCF electronic structure package.
 
 ## Features
 
@@ -17,9 +18,10 @@ NEST is an open-source framework for developing methods based on noncollinear el
 - Noncollinear Spin-Flip TDDFT (SF-TDDFT)
 
   Within the noncollinear TDDFT formalism, SF-TDDFT and conventional spin-conserving TDDFT naturally emerge as two decoupled sectors for collinear reference states.
-
+   
   - Analytic gradients
   - Analytic nonadiabatic derivative couplings (NADC)
+  - Oscillator strengths
   - Spin-orbit coupling (SOC) *(under development)*
 
 - Noncollinear Tensor TDA (NT-TDA)
