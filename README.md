@@ -5,6 +5,27 @@
 NEST is an open-source framework for developing methods based on noncollinear electronic structure theory.
 It is built on top of the PySCF electronic structure package.
 
+## Framework
+
+```text
+                                 PySCF
+                                   │
+                                   ▼
+                        MCfun (Multicollinear Approach)
+                                   │
+        ┌──────────────────────────┼──────────────────────────┐
+        │                          │                          │
+        ▼                          ▼                          ▼
+GKS (Noncollinear DFT)            UKS                        ROKS
+        │                          │                          │
+        ▼                          ▼                          ▼
+Noncollinear TDDFT            SF-TDDFT                     NT-TDA
+                               ├── Gradients               ├── Gradients (under development)
+                               ├── NADC                    └── SOC (under development)
+                               ├── Oscillator strengths
+                               └── SOC (under development)
+```
+
 ## Features
 
 - Noncollinear DFT
@@ -30,6 +51,37 @@ It is built on top of the PySCF electronic structure package.
 
   - Analytic gradients *(under development)*
   - Spin-orbit coupling (SOC) *(under development)*
+
+
+## Authors
+
+### Scientific Lead
+
+**Yunlong Xiao**  
+Associate Professor, Peking University  
+Scientific lead responsible for the theoretical framework, methodology development, and overall project direction.  
+Email: xiaoyl@pku.edu.cn
+
+### Current Software Lead
+
+**Tai Wang**  
+Ph.D. Student, Peking University  
+Current software lead responsible for software architecture, implementation, integration, testing, maintenance, and project coordination.  
+Email: wtpeter@pku.edu.cn
+
+### Module Contributors
+
+| Module | Contributors |
+|---------|--------------|
+| MCfun (Multicollinear Approach) | Zhichen Pu, Hao Li |
+| Noncollinear DFT | Zhichen Pu, Qiming Sun |
+| Noncollinear TDDFT | Hao Li, Qiming Sun |
+| Noncollinear SF-TDA / SF-TDDFT | Hao Li, Tai Wang |
+| Analytic Nuclear Gradients | Hao Li, Tai Wang |
+| Analytic Nonadiabatic Derivative Couplings (NADC) | Yu Jing, Tai Wang |
+| Oscillator Strengths | Tai Wang |
+| Noncollinear Tensor TDA (NT-TDA) | Tai Wang, Wenxian Qin |
+| Spin–Orbit Coupling (SOC) | Tai Wang |
     
 ## Installation
 
