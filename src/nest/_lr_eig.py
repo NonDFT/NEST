@@ -14,27 +14,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Internal iterative eigensolvers shared by NEST response methods."""
+
 import sys
 import numpy as np
 import scipy
 from pyscf.lib import logger
 from pyscf.lib.parameters import MAX_MEMORY
 from pyscf.lib.linalg_helper import _sort_elast
-from pyscf.tdscf._lr_eig import _qr, MAX_SPACE_INC
+from pyscf.tdscf._lr_eig import MAX_SPACE_INC
 
 
 def davidson_nosym1(aop, x0, precond, tol=1e-12, max_cycle=50, lindep=1e-12, callback=None,
-                    max_space=20,
                     max_memory=MAX_MEMORY, nroots=1, pick=None, verbose=logger.WARN):
     '''
     slightly modified from pyscf.lib.linalg.davidson_nosym1 with vectorization support
     '''
-    def _qr(xs, lindep=1e-14):
-        q, r = np.linalg.qr(xs.T, mode='reduced')
-        r_diag = np.abs(np.diag(r))
-        mask = r_diag > lindep
-        qs = q.T[mask]
-        return qs, np.where(mask)[0]
 
     assert callable(pick)
     assert callable(precond)
@@ -143,7 +138,7 @@ def davidson_nosym1(aop, x0, precond, tol=1e-12, max_cycle=50, lindep=1e-12, cal
         max_de = max(abs(de))
         if all(conv):
             log.debug('converged %d %d  |r|= %4.3g  e= %s  max|de|= %4.3g',
-                      icyc, len(xs), max_dx_norm, e, max_de)
+                      icyc, space, max_dx_norm, e, max_de)
             break
 
         mask = (~conv) & (dx_norm**2 > lindep)
@@ -312,7 +307,8 @@ def eigh(aop, x0, precond, tol_residual=1e-5, lindep=1e-12, nroots=1,
         for k, xk in enumerate(xt):
             if dx_norm[k] > tol_residual:
                 xt[k] = precond(xk, e[0])
-        xt -= xs.conj().dot(xt.T).T.dot(xs)
+        for _ in range(2):
+            xt -= xs.conj().dot(xt.T).T.dot(xs)
         xt_norm = np.linalg.norm(xt, axis=1)
 
         remaining = []
@@ -340,3 +336,27 @@ def eigh(aop, x0, precond, tol_residual=1e-5, lindep=1e-12, nroots=1,
         log.warn(f'Not enough eigenvectors (len(x0)={len(x0)}, nroots={nroots})')
 
     return conv, e, x0
+
+def _qr(xs, lindep=1e-12):
+    """
+    Orthogonalize trial vectors in input order.
+    Return orthonormal vectors and their original indices.
+    """
+    xs = np.array(xs, dtype=np.result_type(xs, np.float64), copy=True)
+    nv = 0
+    idx = []
+
+    for i in range(len(xs)):
+        xi = xs[i]
+        if nv > 0:
+            prod = xs[:nv].conj().dot(xi)
+            xi -= prod.dot(xs[:nv])
+            prod = xs[:nv].conj().dot(xi)
+            xi -= prod.dot(xs[:nv])
+
+        norm2 = np.vdot(xi, xi).real
+        if norm2 > lindep:
+            xs[nv] = xi / np.sqrt(norm2)
+            idx.append(i)
+            nv += 1
+    return xs[:nv], np.asarray(idx, dtype=int)
