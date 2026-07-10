@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      OMP_NUM_THREADS: 4
+      OMP_NUM_THREADS: 2
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

@@ -27,7 +27,7 @@ from pyscf.data import nist
 
 from nest.sftda.scf_genrep_sftd import gen_uhf_response_sf
 from nest.sftda.numint2c_sftd import cache_xc_kernel_sf
-from nest.sftda._lr_eig import eigh, davidson_nosym1
+from nest._lr_eig import eigh, davidson_nosym1
 
 # import class
 from pyscf.tdscf.uhf import TDBase
