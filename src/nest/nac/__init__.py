@@ -13,11 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""nest package."""
+"""Nonadiabatic coupling methods for NEST."""
 
-from nest import nttda, sftda
-from nest import nac
+from nest.nac.tduks_sf import NAC, NonAdiabaticCouplings
 
-__version__ = "0.1.0"
-
-__all__ = ["__version__", "nac", "nttda", "sftda"]
+__all__ = ['NAC', 'NonAdiabaticCouplings']
