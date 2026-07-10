@@ -59,15 +59,21 @@ Noncollinear TDDFT            SF-TDDFT                     NT-TDA
 
 **Yunlong Xiao**  
 Associate Professor, Peking University  
-Scientific lead responsible for the theoretical framework, methodology development, and overall project direction.  
+Theory and project direction.  
 Email: xiaoyl@pku.edu.cn
 
 ### Current Software Lead
 
 **Tai Wang**  
 Ph.D. Student, Peking University  
-Current software lead responsible for software architecture, implementation, integration, testing, maintenance, and project coordination.  
+Software development and maintenance.  
 Email: wtpeter@pku.edu.cn
+
+### Benchmarking
+
+**Hao Yang**  
+Undergraduate Student, Peking University  
+Benchmark calculations and validation.
 
 ### Module Contributors
 
