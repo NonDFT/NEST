@@ -657,8 +657,3 @@ class NonAdiabaticCouplings(tdrhf_grad.Gradients):
 
 
 NAC = NonAdiabaticCouplings
-
-from nest.sftda import uhf_sf
-
-uhf_sf.TDA_SF.NAC = uhf_sf.TDDFT_SF.NAC = lib.class_as_method(NonAdiabaticCouplings)
-uhf_sf.TDA_SF.nac_method = uhf_sf.TDDFT_SF.nac_method = uhf_sf.TDA_SF.NAC

@@ -711,6 +711,11 @@ class TDA_SF(TDBase):
         from nest.grad import tduks_sf
         return tduks_sf.Gradients(self)
 
+    def NAC(self):
+        from nest.nac import tduks_sf
+        return tduks_sf.NAC(self)
+    nac_method = NAC
+
     analyze = analyze
     transition_dipole = transition_dipole
     oscillator_strength = oscillator_strength
