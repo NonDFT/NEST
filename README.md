@@ -11,19 +11,20 @@ It is built on top of the PySCF electronic structure package.
                                  PySCF
                                    │
                                    ▼
-                        MCfun (Multicollinear Approach)
+                                 NEST
+                    (Multicollinear Framework)
                                    │
         ┌──────────────────────────┼──────────────────────────┐
         │                          │                          │
         ▼                          ▼                          ▼
-GKS (Noncollinear DFT)            UKS                        ROKS
+       GKS                        UKS                        ROKS
         │                          │                          │
         ▼                          ▼                          ▼
-Noncollinear TDDFT            SF-TDDFT                     NT-TDA
-                               ├── Gradients               ├── Gradients (under development)
-                               ├── NADC                    └── SOC (under development)
-                               ├── Oscillator strengths
-                               └── SOC (under development)
+Noncollinear TDDFT         Noncollinear SF-TDDFT      Noncollinear Tensor TDA
+                                   ├── Gradients            ├── Gradients (in progress)
+                                   ├── Oscillator strengths └── SOC (in progress)
+                                   ├── NADC
+                                   └── SOC
 ```
 
 ## Features
@@ -41,16 +42,16 @@ Noncollinear TDDFT            SF-TDDFT                     NT-TDA
   Within the noncollinear TDDFT formalism, SF-TDDFT and conventional spin-conserving TDDFT naturally emerge as two decoupled sectors for collinear reference states.
    
   - Analytic gradients
-  - Analytic nonadiabatic derivative couplings (NADC)
   - Oscillator strengths
-  - Spin-orbit coupling (SOC) *(under development)*
+  - Analytic nonadiabatic derivative couplings (NADC)
+  - Spin–orbit coupling (SOC)
 
 - Noncollinear Tensor TDA (NT-TDA)
 
   NT-TDA is a spin-consistent extension of noncollinear TDDFT that provides a unified treatment of spin-conserving and spin-flip excitations. For an open-shell reference state with total spin S, it can describe target states with total spins S−1 (except for S = 1/2), S, and S+1. All resulting states are free from spin contamination.
 
-  - Analytic gradients *(under development)*
-  - Spin-orbit coupling (SOC) *(under development)*
+  - Analytic gradients *(in progress)*
+  - SOC *(in progress)*
 
 
 ## Authors
