@@ -716,6 +716,11 @@ class TDA_SF(TDBase):
         return tduks_sf.NAC(self)
     nac_method = NAC
 
+    def SOC(self, soctype="SOMF"):
+        """Create an SOC driver from converged SF-TDA/SF-TDDFT results."""
+        from nest.soc import sftda as sftda_soc
+        return sftda_soc.SOC(self, soctype=soctype)
+
     analyze = analyze
     transition_dipole = transition_dipole
     oscillator_strength = oscillator_strength
