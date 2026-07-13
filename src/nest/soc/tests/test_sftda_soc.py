@@ -8,6 +8,7 @@ import numpy as np
 from pyscf import gto
 from pyscf.data.nist import HARTREE2WAVENUMBER
 from nest import sftda
+from nest.soc.soc import clebsch_gordan_rank1
 
 
 def assert_allclose_up_to_sign(testcase, actual, desired, atol):
@@ -37,6 +38,12 @@ class KnownValues(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.mol.stdout.close()
+
+    def test_rank_one_clebsch_gordan(self):
+        self.assertAlmostEqual(clebsch_gordan_rank1(0, 0, 1, 1, 1), 1.0)
+        self.assertAlmostEqual(clebsch_gordan_rank1(1, 1, 0, 1, 1), 2 ** -0.5)
+        self.assertAlmostEqual(clebsch_gordan_rank1(1, 0, 1, 1, 1), -2 ** -0.5)
+        self.assertAlmostEqual(clebsch_gordan_rank1(1, 0, 0, 0, 0), -3 ** -0.5)
 
     def test_roks_sftda_soc(self):
         mf = self.mol.ROKS(xc='SVWN').run()

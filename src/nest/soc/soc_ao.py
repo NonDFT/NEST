@@ -175,7 +175,8 @@ def get_ao_soc_x2camf(mol):
     try:
         from socutils.somf import somf_pt
     except ImportError:
-        raise ImportError("Please install socutils package to use X2CAMF SOC integrals.")
+        raise ImportError("Please install socutils package to use X2CAMF SOC integrals." \
+        "https://github.com/wtpeter/socutils")
     ao_soc = 2j * somf_pt.get_psoc_x2camf(mol, xresp=X2CAMF_XRESP)
     ao_soc_1 = -0.5 * (ao_soc[0] + 1j * ao_soc[1])
     ao_soc_0 = np.sqrt(0.5) * ao_soc[2]
@@ -254,7 +255,7 @@ def get_ao_soc(mf, soctype):
         soc_ao = get_ao_soc_1e(mol, zeff_type='orca')
     elif soctype == '1e':
         soc_ao = get_ao_soc_1e(mol, zeff_type='one')
-    elif soctype == 'X2CAMF_XRESP':
+    elif soctype == 'X2CAMF':
         soc_ao = get_ao_soc_x2camf(mol)
     else:
         raise ValueError(f'soctype={soctype} is not supported.')
