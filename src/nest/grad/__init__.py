@@ -15,4 +15,6 @@
 
 """Gradient methods for NEST."""
 
-__all__ = []
+from nest.grad import nttda
+
+__all__ = ['nttda']

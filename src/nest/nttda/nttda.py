@@ -764,6 +764,14 @@ class NTTDA(TDBase):
 
     _keys = {'deltaS', 'nobeta'}
 
+    def nuc_grad_method(self):
+        """Return the NTTDA nuclear-gradient driver."""
+        from nest.grad.nttda import Gradients
+
+        return Gradients(self)
+
+    Gradients = nuc_grad_method
+
     def init_guess(self, hdiag, nstates=None):
         if nstates is None:
             nstates = self.nstates

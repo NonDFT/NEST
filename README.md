@@ -20,7 +20,7 @@ GKS (Noncollinear DFT)            UKS                        ROKS
         │                          │                          │
         ▼                          ▼                          ▼
 Noncollinear TDDFT            SF-TDDFT                     NT-TDA
-                               ├── Gradients               ├── Gradients (under development)
+                               ├── Gradients               ├── Analytic gradients
                                ├── NADC                    └── SOC (under development)
                                ├── Oscillator strengths
                                └── SOC (under development)
@@ -49,7 +49,7 @@ Noncollinear TDDFT            SF-TDDFT                     NT-TDA
 
   NT-TDA is a spin-consistent extension of noncollinear TDDFT that provides a unified treatment of spin-conserving and spin-flip excitations. For an open-shell reference state with total spin S, it can describe target states with total spins S−1 (except for S = 1/2), S, and S+1. All resulting states are free from spin contamination.
 
-  - Analytic gradients *(under development)*
+  - Analytic gradients for the $\Delta S=-1$, $\Delta S=0$, and $\Delta S=+1$ channels
   - Spin-orbit coupling (SOC) *(under development)*
 
 
