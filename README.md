@@ -149,4 +149,4 @@ If you use NEST in your research, please cite the relevant publication(s) listed
 
 ### Noncollinear Tensor TDA (NT-TDA)
 
-- Manuscript in preparation.
+- NT-TDA (https://arxiv.org/abs/2607.19933, 2026)
