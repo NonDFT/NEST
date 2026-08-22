@@ -15,8 +15,8 @@
 
 """nest package."""
 
-from nest import nttda, sftda
+from nest import dz0scf, nttda, sftda
 
 __version__ = "0.1.0"
 
-__all__ = ["__version__", "nttda", "sftda"]
+__all__ = ["__version__", "dz0scf", "nttda", "sftda"]
