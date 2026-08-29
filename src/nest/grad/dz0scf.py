@@ -445,7 +445,7 @@ class DZ0Gradients(lib.StreamObject):
 
         hcore_deriv = hs_grad.hcore_generator(mol)
         one_sided_s1 = hs_grad.get_ovlp(mol)
-        
+
         dm_hs_for_gradient = hs_grad._tag_rdm1(
             np.asarray(dm_hs), c0, self._space.f
         )
