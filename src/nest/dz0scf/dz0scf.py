@@ -55,6 +55,9 @@ def evaluate_high_spin_energy(mf):
     )
 
 class _DZ0VeffMixin:
+    reference_energy_semantics = 'high_spin_roks_energy_on_dz0_orbitals'
+    reference_energy_stationary = False
+
     def get_veff(
         self,
         mol=None,
@@ -83,6 +86,9 @@ class _DZ0VeffMixin:
         )
     def high_spin_energy(self):
         return evaluate_high_spin_energy(self)
+
+    def reference_energy(self):
+        return self.high_spin_energy()
 
     def nuc_grad_method(self):
         """Return the Dz0SCF analytic nuclear-gradient driver."""
