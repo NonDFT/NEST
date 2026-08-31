@@ -84,6 +84,11 @@ class _DZ0VeffMixin:
     def high_spin_energy(self):
         return evaluate_high_spin_energy(self)
 
+    def nuc_grad_method(self):
+        """Return the Dz0SCF analytic nuclear-gradient driver."""
+        from nest.grad.dz0scf import Gradients
+        return Gradients(self)
+
 class EnsembleROKS(_DZ0VeffMixin, dft.roks.ROKS):
     pass
 
