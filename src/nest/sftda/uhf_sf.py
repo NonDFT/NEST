@@ -35,238 +35,6 @@ from pyscf.scf import uhf_symm
 
 MO_BASE = getattr(__config__, 'MO_BASE', 1)
 
-def oscillator_strength(tdobj, ref=1, state=None):
-    r'''
-    Oscillator strengths between excited states for spin-flip TDDFT/TDA.
-    Only applicable to length gauge.
-
-    Args:
-            tdobj : an instance of TDA_SF/TDDFT_SF
-            ref : int
-                Index of the reference excited state (1-based). Default is 1.
-            state : int, list, or ndarray, optional
-                Index/indices of the target excited state(s) (1-based).
-                If None, all excited states except the 'ref' state are calculated.
-
-        Returns:
-            float or ndarray
-            Oscillator strength(s) between the reference and target state(s).
-    '''
-    if state is None:
-        states = np.arange(tdobj.nstates) + 1
-    else:
-        states = np.atleast_1d(state)
-    states = states[states != ref]
-
-    trans_dip = transition_dipole(tdobj, ref, states)
-
-    ref -= 1
-    states -= 1
-    es = tdobj.e[states] - tdobj.e[ref]
-    f = (2./3.) * lib.einsum('n,nx,nx->n', es, trans_dip.conj(), trans_dip).real
-    if isinstance(state, int):
-        return f[0]
-    else:
-        return f
-
-def transition_dipole(tdobj, ref=1, state=None):
-    '''
-    Transition dipole moments between excited states for Spin-flip TDDFT/TDA.
-    Only applicable to length gauge.
-    '''
-    if state is None:
-        states = np.arange(tdobj.nstates) + 1
-    else:
-        states = np.atleast_1d(state)
-    states = states[states != ref]
-    ref -= 1
-    states -= 1
-
-    mf = tdobj._scf
-    mo_coeff = mf.mo_coeff
-    mo_occ = mf.mo_occ
-    occidxa = mo_occ[0] > 0
-    occidxb = mo_occ[1] > 0
-    viridxa = mo_occ[0] == 0
-    viridxb = mo_occ[1] == 0
-    orboa = mo_coeff[0][:, occidxa]
-    orbob = mo_coeff[1][:, occidxb]
-    orbva = mo_coeff[0][:, viridxa]
-    orbvb = mo_coeff[1][:, viridxb]
-
-    mx = tdobj.xy[ref][0]
-    nxs = np.array([tdobj.xy[i][0] for i in states])
-    if isinstance(tdobj.xy[0][1], np.ndarray):
-        my = tdobj.xy[ref][1]
-        nys = np.array([tdobj.xy[i][1] for i in states])
-    else:
-        nys = None
-        my = None
-    if tdobj.extype==0:
-        gamma_oo_bb = - lib.einsum('ia,nja->nij', mx.conj(), nxs)
-        gamma_bb = lib.einsum('uj,vi,nij->nvu', orbob.conj(), orbob, gamma_oo_bb)
-        gamma_vv_aa = lib.einsum('ib,nia->nab', mx.conj(), nxs)
-        gamma_aa = lib.einsum('ub,va,nab->nvu', orbva.conj(), orbva, gamma_vv_aa)
-        if my is not None:
-            gamma_oo_aa = - lib.einsum('ja,nia->nij', my.conj(), nys)
-            gamma_aa += lib.einsum('uj,vi,nij->nvu', orboa.conj(), orboa, gamma_oo_aa)
-            gamma_vv_bb = lib.einsum('ia,nib->nab', my.conj(), nys)
-            gamma_bb += lib.einsum('ub,va,nab->nvu', orbvb.conj(), orbvb, gamma_vv_bb)
-    elif tdobj.extype==1:
-        gamma_oo_aa = - lib.einsum('ia,nja->nij', mx.conj(), nxs)
-        gamma_aa = lib.einsum('uj,vi,nij->nvu', orboa.conj(), orboa, gamma_oo_aa)
-        gamma_vv_bb = lib.einsum('ib,nia->nab', mx.conj(), nxs)
-        gamma_bb = lib.einsum('ub,va,nab->nvu', orbvb.conj(), orbvb, gamma_vv_bb)
-        if my is not None:
-            gamma_oo_bb = - lib.einsum('ja,nia->nij', my.conj(), nys)
-            gamma_bb += lib.einsum('uj,vi,nij->nvu', orbob.conj(), orbob, gamma_oo_bb)
-            gamma_vv_aa = lib.einsum('ia,nib->nab', my.conj(), nys)
-            gamma_aa += lib.einsum('ub,va,nab->nvu', orbva.conj(), orbva, gamma_vv_aa)
-
-    gamma = gamma_aa + gamma_bb
-    dip_int = mf.mol.intor_symmetric('int1e_r', comp=3)
-    pol = lib.einsum('nvu,xuv->nx', gamma, dip_int)
-    return pol.real
-
-def spin_square(tdobj, state=None):
-    r'''
-    <S^2> of excited states for Spin-flip TDDFT/TDA.
-    Ref: J. Chem. Phys. 2011, 134, 134101.
-
-    Args:
-            tdobj : an instance of TDA_SF/TDDFT_SF
-            state : int, list, or ndarray, optional
-                Index/indices of the target excited state(s) (1-based).
-                If None, all excited states are calculated.
-
-    Returns:
-            float or ndarray
-            <S^2> of the target excited state(s).
-    '''
-    mf = tdobj._scf
-    s20, _ = mf.spin_square()
-    sz = mf.mol.spin / 2.0
-
-    mo_coeff = mf.mo_coeff
-    mo_occ = mf.mo_occ
-    occidxa = mo_occ[0] > 0
-    occidxb = mo_occ[1] > 0
-    viridxa = mo_occ[0] == 0
-    viridxb = mo_occ[1] == 0
-    orboa = mo_coeff[0][:, occidxa]
-    orbob = mo_coeff[1][:, occidxb]
-    orbva = mo_coeff[0][:, viridxa]
-    orbvb = mo_coeff[1][:, viridxb]
-
-    ovlp = mf.get_ovlp()
-    sab_oo = orboa.conj().T @ ovlp @ orbob
-    sba_oo = sab_oo.conj().T
-    sab_vo = orbva.conj().T @ ovlp @ orbob
-    sba_ov = sab_vo.conj().T
-    sba_vo = orbvb.conj().T @ ovlp @ orboa
-    sab_ov = sba_vo.conj().T
-
-    if state is None:
-        states = np.arange(tdobj.nstates)
-    else:
-        states = np.atleast_1d(state) - 1
-    xs = np.array([tdobj.xy[i][0].T for i in states])
-    if isinstance(tdobj.xy[0][1], np.ndarray):
-        ys = np.array([tdobj.xy[i][1].T for i in states])
-    else:
-        ys = None
-
-    if tdobj.extype==0:
-        assert xs[0].shape==sab_vo.shape
-        P_ab = lib.einsum('nai,naj,jk,ki->n', xs.conj(), xs, sba_oo, sab_oo) \
-               - lib.einsum('nai,nbi,kb,ak->n', xs.conj(), xs, sba_ov, sab_vo) \
-               + lib.einsum('nai,nbj,jb,ai->n', xs.conj(), xs, sba_ov, sab_vo)
-        if ys is not None:
-            assert ys[0].shape==sba_vo.shape
-            P_ab += lib.einsum('nai,naj,ik,kj->n', ys.conj(), ys, sab_oo, sba_oo) \
-                    - lib.einsum('nai,nbi,ka,bk->n', ys.conj(), ys, sab_ov, sba_vo) \
-                    + lib.einsum('nai,nbj,ia,bj->n', ys.conj(), ys, sab_ov, sba_vo) \
-                    - 2 * lib.einsum('nai,nbj,ai,bj->n', xs.conj(), ys, sab_vo, sba_vo).real
-        ds2 = P_ab + 2 * sz + 1
-    elif tdobj.extype==1:
-        assert xs[0].shape==sba_vo.shape
-        P_ab = lib.einsum('nai,naj,jk,ki->n', xs.conj(), xs, sab_oo, sba_oo) \
-               - lib.einsum('nai,nbi,kb,ak->n', xs.conj(), xs, sab_ov, sba_vo) \
-               + lib.einsum('nai,nbj,jb,ai->n', xs.conj(), xs, sab_ov, sba_vo)
-        if ys is not None:
-            assert ys[0].shape==sab_vo.shape
-            P_ab += lib.einsum('nai,naj,ik,kj->n', ys.conj(), ys, sba_oo, sab_oo) \
-                    - lib.einsum('nai,nbi,ka,bk->n', ys.conj(), ys, sba_ov, sab_vo) \
-                    + lib.einsum('nai,nbj,ia,bj->n', ys.conj(), ys, sba_ov, sab_vo) \
-                    - 2 * lib.einsum('nai,nbj,ai,bj->n', xs.conj(), ys, sba_vo, sab_vo).real
-        ds2 = P_ab - 2 * sz + 1
-
-    s2s = s20 + ds2.real
-    if isinstance(state, int):
-        return s2s[0]
-    else:
-        return s2s
-
-def _analyze_wfnsym(tdobj, x_sym, x):
-    '''
-    Guess the excitation symmetry of TDDFT X amplitude.
-    Return a label.
-    x_sym and x are of the same shape.'''
-    possible_sym = x_sym[(x > 0.1) | (x < -0.1)]
-    wfnsym = symm.MULTI_IRREPS
-    ids = possible_sym[possible_sym != symm.MULTI_IRREPS]
-    if len(ids) > 0 and all(ids == ids[0]):
-        wfnsym = ids[0]
-    if wfnsym == symm.MULTI_IRREPS:
-        wfnsym_label = '???'
-    else:
-        wfnsym_label = symm.irrep_id2name(tdobj.mol.groupname, wfnsym)
-    return wfnsym, wfnsym_label
-
-def analyze(tdobj, verbose=None):
-    log = logger.new_logger(tdobj, verbose)
-    mol = tdobj.mol
-    maska, maskb = tdobj.get_frozen_mask()
-    mo_coeff = (tdobj._scf.mo_coeff[0][:, maska], tdobj._scf.mo_coeff[1][:, maskb])
-    mo_occ = (tdobj._scf.mo_occ[0][maska], tdobj._scf.mo_occ[1][maskb])
-    nocc_a = np.count_nonzero(mo_occ[0] == 1)
-    nocc_b = np.count_nonzero(mo_occ[1] == 1)
-
-    if mol.symmetry and mol.groupname!='C1':
-        orbsyma, orbsymb = uhf_symm.get_orbsym(mol, mo_coeff)
-        x_symab = symm.direct_prod(orbsyma[mo_occ[0]==1], orbsymb[mo_occ[1]==0], mol.groupname)
-        x_symba = symm.direct_prod(orbsymb[mo_occ[1]==1], orbsyma[mo_occ[0]==0], mol.groupname)
-    else:
-        x_symab = x_symba = None
-    S2s = spin_square(tdobj)
-    for i in range(tdobj.nstates):
-        x, y = tdobj.xy[i]
-        if tdobj.extype==0:
-            x_sym = x_symba
-        elif tdobj.extype==1:
-            x_sym = x_symab
-        S2 = S2s[i]
-        e_ev = np.asarray(tdobj.e[i]) * nist.HARTREE2EV
-        if x_symab is None:
-            log.note('Excited State %3d: %12.5f eV   <S^2>: %6.4f', i+1, e_ev, S2)
-        else:
-            wfnsymid, wfnsymlabel = _analyze_wfnsym(tdobj, x_sym, x)
-            refsym = tdobj._scf.get_wfnsym()
-            statesymid = wfnsymid ^ refsym
-            if refsym == symm.MULTI_IRREPS or wfnsymid == symm.MULTI_IRREPS:
-                statesymlabel = '???'
-            else:
-                statesymlabel = symm.irrep_id2name(mol.groupname, statesymid)
-            log.note('Excited State %3d: %4s (State: %4s) %12.5f eV   <S^2>: %6.4f',
-                     i+1, wfnsymlabel, statesymlabel, e_ev, S2)
-
-        if log.verbose >= logger.INFO:
-            if tdobj.extype==0:
-                for o, v in zip(* np.where(abs(x) > 0.1)):
-                    log.info('    %4db -> %4da %12.5f', o+MO_BASE, v+MO_BASE+nocc_a, x[o,v])
-            elif tdobj.extype==1:
-                for o, v in zip(* np.where(abs(x) > 0.1)):
-                    log.info('    %4da -> %4db %12.5f', o+MO_BASE, v+MO_BASE+nocc_b, x[o,v])
 
 def get_ab_sf(
     mf,
@@ -721,11 +489,6 @@ class TDA_SF(TDBase):
         from nest.soc import sftda as sftda_soc
         return sftda_soc.SOC(self, soctype=soctype)
 
-    analyze = analyze
-    transition_dipole = transition_dipole
-    oscillator_strength = oscillator_strength
-    spin_square = spin_square
-
 
 class TDDFT_SF(TDA_SF):
     '''Solve the Casida TDDFT formula
@@ -946,6 +709,245 @@ class TDDFT_SF(TDA_SF):
 
         self._finalize()
         return self.e, self.xy
+
+def oscillator_strength(tdobj, ref=1, state=None):
+    r'''
+    Oscillator strengths between excited states for spin-flip TDDFT/TDA.
+    Only applicable to length gauge.
+
+    Args:
+            tdobj : an instance of TDA_SF/TDDFT_SF
+            ref : int
+                Index of the reference excited state (1-based). Default is 1.
+            state : int, list, or ndarray, optional
+                Index/indices of the target excited state(s) (1-based).
+                If None, all excited states except the 'ref' state are calculated.
+
+        Returns:
+            float or ndarray
+            Oscillator strength(s) between the reference and target state(s).
+    '''
+    if state is None:
+        states = np.arange(tdobj.nstates) + 1
+    else:
+        states = np.atleast_1d(state)
+    states = states[states != ref]
+
+    trans_dip = transition_dipole(tdobj, ref, states)
+
+    ref -= 1
+    states -= 1
+    es = tdobj.e[states] - tdobj.e[ref]
+    f = (2./3.) * lib.einsum('n,nx,nx->n', es, trans_dip.conj(), trans_dip).real
+    if isinstance(state, int):
+        return f[0]
+    else:
+        return f
+
+def transition_dipole(tdobj, ref=1, state=None):
+    '''
+    Transition dipole moments between excited states for Spin-flip TDDFT/TDA.
+    Only applicable to length gauge.
+    '''
+    if state is None:
+        states = np.arange(tdobj.nstates) + 1
+    else:
+        states = np.atleast_1d(state)
+    states = states[states != ref]
+    ref -= 1
+    states -= 1
+
+    mf = tdobj._scf
+    mo_coeff = mf.mo_coeff
+    mo_occ = mf.mo_occ
+    occidxa = mo_occ[0] > 0
+    occidxb = mo_occ[1] > 0
+    viridxa = mo_occ[0] == 0
+    viridxb = mo_occ[1] == 0
+    orboa = mo_coeff[0][:, occidxa]
+    orbob = mo_coeff[1][:, occidxb]
+    orbva = mo_coeff[0][:, viridxa]
+    orbvb = mo_coeff[1][:, viridxb]
+
+    mx = tdobj.xy[ref][0]
+    nxs = np.array([tdobj.xy[i][0] for i in states])
+    if isinstance(tdobj.xy[0][1], np.ndarray):
+        my = tdobj.xy[ref][1]
+        nys = np.array([tdobj.xy[i][1] for i in states])
+    else:
+        nys = None
+        my = None
+    if tdobj.extype==0:
+        gamma_oo_bb = - lib.einsum('ia,nja->nij', mx.conj(), nxs)
+        gamma_bb = lib.einsum('uj,vi,nij->nvu', orbob.conj(), orbob, gamma_oo_bb)
+        gamma_vv_aa = lib.einsum('ib,nia->nab', mx.conj(), nxs)
+        gamma_aa = lib.einsum('ub,va,nab->nvu', orbva.conj(), orbva, gamma_vv_aa)
+        if my is not None:
+            gamma_oo_aa = - lib.einsum('ja,nia->nij', my.conj(), nys)
+            gamma_aa += lib.einsum('uj,vi,nij->nvu', orboa.conj(), orboa, gamma_oo_aa)
+            gamma_vv_bb = lib.einsum('ia,nib->nab', my.conj(), nys)
+            gamma_bb += lib.einsum('ub,va,nab->nvu', orbvb.conj(), orbvb, gamma_vv_bb)
+    elif tdobj.extype==1:
+        gamma_oo_aa = - lib.einsum('ia,nja->nij', mx.conj(), nxs)
+        gamma_aa = lib.einsum('uj,vi,nij->nvu', orboa.conj(), orboa, gamma_oo_aa)
+        gamma_vv_bb = lib.einsum('ib,nia->nab', mx.conj(), nxs)
+        gamma_bb = lib.einsum('ub,va,nab->nvu', orbvb.conj(), orbvb, gamma_vv_bb)
+        if my is not None:
+            gamma_oo_bb = - lib.einsum('ja,nia->nij', my.conj(), nys)
+            gamma_bb += lib.einsum('uj,vi,nij->nvu', orbob.conj(), orbob, gamma_oo_bb)
+            gamma_vv_aa = lib.einsum('ia,nib->nab', my.conj(), nys)
+            gamma_aa += lib.einsum('ub,va,nab->nvu', orbva.conj(), orbva, gamma_vv_aa)
+
+    gamma = gamma_aa + gamma_bb
+    dip_int = mf.mol.intor_symmetric('int1e_r', comp=3)
+    pol = lib.einsum('nvu,xuv->nx', gamma, dip_int)
+    return pol
+
+def spin_square(tdobj, state=None):
+    r'''
+    <S^2> of excited states for Spin-flip TDDFT/TDA.
+    Ref: J. Chem. Phys. 2011, 134, 134101.
+
+    Args:
+            tdobj : an instance of TDA_SF/TDDFT_SF
+            state : int, list, or ndarray, optional
+                Index/indices of the target excited state(s) (1-based).
+                If None, all excited states are calculated.
+
+    Returns:
+            float or ndarray
+            <S^2> of the target excited state(s).
+    '''
+    mf = tdobj._scf
+    s20, _ = mf.spin_square()
+    sz = mf.mol.spin / 2.0
+
+    mo_coeff = mf.mo_coeff
+    mo_occ = mf.mo_occ
+    occidxa = mo_occ[0] > 0
+    occidxb = mo_occ[1] > 0
+    viridxa = mo_occ[0] == 0
+    viridxb = mo_occ[1] == 0
+    orboa = mo_coeff[0][:, occidxa]
+    orbob = mo_coeff[1][:, occidxb]
+    orbva = mo_coeff[0][:, viridxa]
+    orbvb = mo_coeff[1][:, viridxb]
+
+    ovlp = mf.get_ovlp()
+    sab_oo = orboa.conj().T @ ovlp @ orbob
+    sba_oo = sab_oo.conj().T
+    sab_vo = orbva.conj().T @ ovlp @ orbob
+    sba_ov = sab_vo.conj().T
+    sba_vo = orbvb.conj().T @ ovlp @ orboa
+    sab_ov = sba_vo.conj().T
+
+    if state is None:
+        states = np.arange(tdobj.nstates)
+    else:
+        states = np.atleast_1d(state) - 1
+    xs = np.array([tdobj.xy[i][0].T for i in states])
+    if isinstance(tdobj.xy[0][1], np.ndarray):
+        ys = np.array([tdobj.xy[i][1].T for i in states])
+    else:
+        ys = None
+
+    if tdobj.extype==0:
+        assert xs[0].shape==sab_vo.shape
+        P_ab = lib.einsum('nai,naj,jk,ki->n', xs.conj(), xs, sba_oo, sab_oo) \
+               - lib.einsum('nai,nbi,kb,ak->n', xs.conj(), xs, sba_ov, sab_vo) \
+               + lib.einsum('nai,nbj,jb,ai->n', xs.conj(), xs, sba_ov, sab_vo)
+        if ys is not None:
+            assert ys[0].shape==sba_vo.shape
+            P_ab += lib.einsum('nai,naj,ik,kj->n', ys.conj(), ys, sab_oo, sba_oo) \
+                    - lib.einsum('nai,nbi,ka,bk->n', ys.conj(), ys, sab_ov, sba_vo) \
+                    + lib.einsum('nai,nbj,ia,bj->n', ys.conj(), ys, sab_ov, sba_vo) \
+                    - 2 * lib.einsum('nai,nbj,ai,bj->n', xs.conj(), ys, sab_vo, sba_vo).real
+        ds2 = P_ab + 2 * sz + 1
+    elif tdobj.extype==1:
+        assert xs[0].shape==sba_vo.shape
+        P_ab = lib.einsum('nai,naj,jk,ki->n', xs.conj(), xs, sab_oo, sba_oo) \
+               - lib.einsum('nai,nbi,kb,ak->n', xs.conj(), xs, sab_ov, sba_vo) \
+               + lib.einsum('nai,nbj,jb,ai->n', xs.conj(), xs, sab_ov, sba_vo)
+        if ys is not None:
+            assert ys[0].shape==sab_vo.shape
+            P_ab += lib.einsum('nai,naj,ik,kj->n', ys.conj(), ys, sba_oo, sab_oo) \
+                    - lib.einsum('nai,nbi,ka,bk->n', ys.conj(), ys, sba_ov, sab_vo) \
+                    + lib.einsum('nai,nbj,ia,bj->n', ys.conj(), ys, sba_ov, sab_vo) \
+                    - 2 * lib.einsum('nai,nbj,ai,bj->n', xs.conj(), ys, sba_vo, sab_vo).real
+        ds2 = P_ab - 2 * sz + 1
+
+    s2s = s20 + ds2.real
+    if isinstance(state, int):
+        return s2s[0]
+    else:
+        return s2s
+
+def _analyze_wfnsym(tdobj, x_sym, x):
+    '''
+    Guess the excitation symmetry of TDDFT X amplitude.
+    Return a label.
+    x_sym and x are of the same shape.'''
+    possible_sym = x_sym[(x > 0.1) | (x < -0.1)]
+    wfnsym = symm.MULTI_IRREPS
+    ids = possible_sym[possible_sym != symm.MULTI_IRREPS]
+    if len(ids) > 0 and all(ids == ids[0]):
+        wfnsym = ids[0]
+    if wfnsym == symm.MULTI_IRREPS:
+        wfnsym_label = '???'
+    else:
+        wfnsym_label = symm.irrep_id2name(tdobj.mol.groupname, wfnsym)
+    return wfnsym, wfnsym_label
+
+def analyze(tdobj, verbose=None):
+    log = logger.new_logger(tdobj, verbose)
+    mol = tdobj.mol
+    maska, maskb = tdobj.get_frozen_mask()
+    mo_coeff = (tdobj._scf.mo_coeff[0][:, maska], tdobj._scf.mo_coeff[1][:, maskb])
+    mo_occ = (tdobj._scf.mo_occ[0][maska], tdobj._scf.mo_occ[1][maskb])
+    nocc_a = np.count_nonzero(mo_occ[0] == 1)
+    nocc_b = np.count_nonzero(mo_occ[1] == 1)
+
+    if mol.symmetry and mol.groupname!='C1':
+        orbsyma, orbsymb = uhf_symm.get_orbsym(mol, mo_coeff)
+        x_symab = symm.direct_prod(orbsyma[mo_occ[0]==1], orbsymb[mo_occ[1]==0], mol.groupname)
+        x_symba = symm.direct_prod(orbsymb[mo_occ[1]==1], orbsyma[mo_occ[0]==0], mol.groupname)
+    else:
+        x_symab = x_symba = None
+    S2s = spin_square(tdobj)
+    for i in range(tdobj.nstates):
+        x, y = tdobj.xy[i]
+        if tdobj.extype==0:
+            x_sym = x_symba
+        elif tdobj.extype==1:
+            x_sym = x_symab
+        S2 = S2s[i]
+        e_ev = np.asarray(tdobj.e[i]) * nist.HARTREE2EV
+        if x_symab is None:
+            log.note('Excited State %3d: %12.5f eV   <S^2>: %6.4f', i+1, e_ev, S2)
+        else:
+            wfnsymid, wfnsymlabel = _analyze_wfnsym(tdobj, x_sym, x)
+            refsym = tdobj._scf.get_wfnsym()
+            statesymid = wfnsymid ^ refsym
+            if refsym == symm.MULTI_IRREPS or wfnsymid == symm.MULTI_IRREPS:
+                statesymlabel = '???'
+            else:
+                statesymlabel = symm.irrep_id2name(mol.groupname, statesymid)
+            log.note('Excited State %3d: %4s (State: %4s) %12.5f eV   <S^2>: %6.4f',
+                     i+1, wfnsymlabel, statesymlabel, e_ev, S2)
+
+        if log.verbose >= logger.INFO:
+            if tdobj.extype==0:
+                for o, v in zip(* np.where(abs(x) > 0.1)):
+                    log.info('    %4db -> %4da %12.5f', o+MO_BASE, v+MO_BASE+nocc_a, x[o,v])
+            elif tdobj.extype==1:
+                for o, v in zip(* np.where(abs(x) > 0.1)):
+                    log.info('    %4da -> %4db %12.5f', o+MO_BASE, v+MO_BASE+nocc_b, x[o,v])
+
+
+TDA_SF.analyze = analyze
+TDA_SF.transition_dipole = transition_dipole
+TDA_SF.oscillator_strength = oscillator_strength
+TDA_SF.spin_square = spin_square
 
 SFTDA = TDA_SF
 SFTDDFT = TDDFT_SF
