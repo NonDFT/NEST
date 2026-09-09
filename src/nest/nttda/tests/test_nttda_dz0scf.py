@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Acceptance tests for EnsembleRKS-based NTTDA energies."""
+"""Acceptance tests for Dz0SCF-based NTTDA energies."""
 
 import unittest
 
@@ -7,11 +7,11 @@ import numpy as np
 
 from pyscf import gto
 from pyscf.scf import hf
-from nest.ensemble_rks import EnsembleRKS
+from nest.dz0scf import DZ0SCF
 from nest.nttda import NTTDA
 
 
-class EnsembleRKSReference(unittest.TestCase):
+class Dz0SCFReference(unittest.TestCase):
     @staticmethod
     def lithium_hydride_cation():
         return gto.M(
@@ -24,24 +24,23 @@ class EnsembleRKSReference(unittest.TestCase):
         )
 
     def make_reference(self, xc="SVWN"):
-        mf = EnsembleRKS(self.lithium_hydride_cation()).set(
-            xc=xc,
-            conv_tol=1e-12,
-            conv_tol_grad=1e-9,
-            max_cycle=100,
-            verbose=0,
-        )
+        mf = DZ0SCF(self.lithium_hydride_cation(), xc=xc)
+        mf.conv_tol = 1e-12
+        mf.conv_tol_grad = 1e-9
+        mf.max_cycle = 100
+        mf.verbose = 0
         mf.grids.level = 0
         mf.kernel()
         self.assertTrue(mf.converged)
         return mf
 
-    def test_fixed_occupations_define_a_spin_unpolarized_ensemble(self):
+    def test_fixed_occupations_define_a_spin_unpolarized_reference(self):
         mf = self.make_reference()
         np.testing.assert_array_equal(mf.mo_occ, [2, 1, 0, 0, 0, 0])
         self.assertAlmostEqual(mf.mo_occ.sum(), mf.mol.nelectron)
 
-        dm = mf.make_rdm1()
+        mo = np.asarray(mf.mo_coeff)
+        dm = (mo * np.asarray(mf.mo_occ)) @ mo.conj().T
         dma, dmb = mf.make_rdm1s()
         np.testing.assert_allclose(dma, dmb, atol=0, rtol=0)
         np.testing.assert_allclose(dma + dmb, dm, atol=1e-14, rtol=0)
@@ -65,11 +64,7 @@ class EnsembleRKSReference(unittest.TestCase):
             rtol=0,
         )
 
-    def test_explicit_open_shell_count_must_match_molecular_spin(self):
-        with self.assertRaisesRegex(ValueError, "nopen.*mol.spin"):
-            EnsembleRKS(self.lithium_hydride_cation(), nopen=3)
-
-    def test_nttda_energy_uses_the_ensemble_fock_for_both_nobeta_values(self):
+    def test_nttda_energy_is_independent_of_the_nobeta_flag(self):
         mf = self.make_reference()
         energies = []
         for nobeta in (False, True):
@@ -86,16 +81,18 @@ class EnsembleRKSReference(unittest.TestCase):
             energies.append(tdobj.e)
         np.testing.assert_allclose(energies[0], energies[1], atol=1e-12, rtol=0)
 
-    def test_reference_energy_is_the_stationary_average_occupation_energy(self):
+    def test_reference_energy_is_the_high_spin_roks_energy(self):
         mf = self.make_reference()
         self.assertEqual(
             mf.reference_energy_semantics,
-            "average_occupation_ensemble_rks_energy",
+            "high_spin_roks_energy_on_dz0_orbitals",
         )
-        self.assertTrue(mf.reference_energy_stationary)
-        self.assertAlmostEqual(mf.reference_energy(), mf.e_tot, places=14)
+        self.assertFalse(mf.reference_energy_stationary)
+        self.assertAlmostEqual(
+            mf.reference_energy(), mf.high_spin_energy(), places=14,
+        )
 
-    def test_nttda_total_energies_use_the_selected_reference_energy(self):
+    def test_nttda_total_energies_use_the_reference_energy(self):
         mf = self.make_reference()
         tdobj = NTTDA(mf).set(
             deltaS=0,
@@ -105,10 +102,10 @@ class EnsembleRKSReference(unittest.TestCase):
             verbose=0,
         ).run()
 
-        self.assertAlmostEqual(tdobj.reference_energy(), mf.e_tot)
+        self.assertAlmostEqual(tdobj.reference_energy(), mf.high_spin_energy())
         np.testing.assert_allclose(
             tdobj.total_energies(),
-            mf.e_tot + tdobj.e,
+            mf.high_spin_energy() + tdobj.e,
             atol=1e-13,
             rtol=0,
         )
@@ -135,12 +132,10 @@ class EnsembleRKSReference(unittest.TestCase):
             unit="Bohr",
             verbose=0,
         )
-        mf = EnsembleRKS(mol).set(
-            xc="SVWN",
-            conv_tol=1e-12,
-            max_cycle=150,
-            verbose=0,
-        )
+        mf = DZ0SCF(mol, xc="SVWN")
+        mf.conv_tol = 1e-12
+        mf.max_cycle = 150
+        mf.verbose = 0
         mf.grids.level = 0
         mf.kernel()
         self.assertTrue(mf.converged)

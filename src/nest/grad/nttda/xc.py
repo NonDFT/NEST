@@ -339,7 +339,7 @@ def _project_channel_potentials(tdobj, potentials, blocks):
 def _reference_spin_densities(tdobj):
     """Spin densities of the variational reference used by the XC kernel."""
     mf = tdobj._scf
-    if getattr(mf, "is_ensemble_rks", False):
+    if getattr(mf, "is_average_occupation_reference", False):
         return tuple(np.asarray(dm) for dm in mf.make_rdm1s())
     mo = np.asarray(mf.mo_coeff)
     return (
@@ -352,7 +352,7 @@ def _reference_spin_occupations(tdobj):
     """Per-orbital alpha/beta occupations of the reference density."""
     mf = tdobj._scf
     occupation = np.asarray(mf.mo_occ)
-    if getattr(mf, "is_ensemble_rks", False):
+    if getattr(mf, "is_average_occupation_reference", False):
         return 0.5 * occupation, 0.5 * occupation
     return (occupation > 0).astype(float), (occupation == 2).astype(float)
 
@@ -644,7 +644,6 @@ def lda_response_terms(
     reference_alpha = np.zeros((nao, nao))
     reference_beta = np.zeros_like(reference_alpha)
     direct = np.zeros((len(atmlst), 3))
-    mo = np.asarray(mf.mo_coeff)
     density_alpha, density_beta = _reference_spin_densities(tdobj)
     density_labels, density_stack = _response_density_stack(
         densities, density_alpha, density_beta,
@@ -806,7 +805,7 @@ def lda_nobeta_reference_q(tdobj, p0, max_memory=None):
     nmo = mo.shape[1]
     q_alpha = np.zeros((nmo, nmo))
     q_beta = np.zeros_like(q_alpha)
-    if not tdobj.nobeta or getattr(mf, "is_ensemble_rks", False):
+    if not tdobj.nobeta or getattr(mf, "is_average_occupation_reference", False):
         return q_alpha, q_beta
     if max_memory is None:
         max_memory = tdobj.max_memory
@@ -1145,7 +1144,7 @@ def gga_nobeta_reference_q(tdobj, p0, max_memory=None):
     mo = np.asarray(mf.mo_coeff)
     q_alpha = np.zeros((mo.shape[1], mo.shape[1]))
     q_beta = np.zeros_like(q_alpha)
-    if not tdobj.nobeta or getattr(mf, "is_ensemble_rks", False):
+    if not tdobj.nobeta or getattr(mf, "is_average_occupation_reference", False):
         return q_alpha, q_beta
     if max_memory is None:
         max_memory = tdobj.max_memory
@@ -1485,7 +1484,7 @@ def mgga_nobeta_reference_q(tdobj, p0, max_memory=None):
     mo = np.asarray(mf.mo_coeff)
     q_alpha = np.zeros((mo.shape[1], mo.shape[1]))
     q_beta = np.zeros_like(q_alpha)
-    if not tdobj.nobeta or getattr(mf, "is_ensemble_rks", False):
+    if not tdobj.nobeta or getattr(mf, "is_average_occupation_reference", False):
         return q_alpha, q_beta
     if max_memory is None:
         max_memory = tdobj.max_memory

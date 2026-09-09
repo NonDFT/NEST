@@ -30,33 +30,32 @@ from pyscf.dft.numint import _scale_ao_sparse, _dot_ao_ao_sparse, _dot_ao_dm_spa
 from pyscf.tdscf._lr_eig import eigh as lr_eigh
 from pyscf import symm
 from pyscf.data import nist
-from nest.ensemble_rks import EnsembleRKS
 
 MO_BASE = getattr(__config__, 'MO_BASE', 1)
 MO_GRID_FXC1 = True
 
 
-def _is_ensemble_reference(mf):
-    return isinstance(mf, EnsembleRKS)
+def _is_average_occupation_reference(mf):
+    return getattr(mf, "is_average_occupation_reference", False)
 
 
 def _require_nttda_reference(mf):
     supported = (
         dft.roks.ROKS,
         dft.rks_symm.SymAdaptedROKS,
-        EnsembleRKS,
     )
     if not isinstance(mf, supported):
-        raise TypeError("NTTDA response requires ROKS or EnsembleRKS reference")
+        raise TypeError("NTTDA response requires a ROKS or Dz0SCF reference")
 
 
 def _reference_fock0(mf, nobeta):
     """Return the common Fock used by the NTTDA orbital terms.
 
-    EnsembleRKS is self-consistent in ``F0[D/2,D/2]``.  For ROKS, retain the
-    two historical choices controlled by ``nobeta``.
+    A Dz0SCF (average-occupation) reference is self-consistent in
+    ``F0[D/2,D/2]``.  For ROKS, retain the two historical choices controlled
+    by ``nobeta``.
     """
-    if _is_ensemble_reference(mf):
+    if _is_average_occupation_reference(mf):
         return np.asarray(mf.get_fock())
     if nobeta:
         dma, dmb = mf.make_rdm1()
@@ -1466,4 +1465,3 @@ NTTDA.oscillator_strength = oscillator_strength
 
 dft.roks.ROKS.NTTDA = lib.class_as_method(NTTDA)
 dft.rks_symm.SymAdaptedROKS.NTTDA = lib.class_as_method(NTTDA)
-EnsembleRKS.NTTDA = lib.class_as_method(NTTDA)

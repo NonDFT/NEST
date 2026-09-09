@@ -1,4 +1,4 @@
-"""Average-occupation orbital response for EnsembleRKS NTTDA gradients."""
+"""Average-occupation orbital response for Dz0SCF NTTDA gradients."""
 
 import numpy as np
 
@@ -143,7 +143,7 @@ def solve_zvector(action, pairs, tdobj, rhs, tolerance=1e-12,
 def finish_gradient(
         gradient_driver, tdobj, m_matrix, direct, atmlst,
         tolerance, max_cycle, fock_direct, direct_fock_probes=None):
-    """Solve the EnsembleRKS adjoint and assemble ``d omega / dR``."""
+    """Solve the Dz0SCF average-occupation adjoint and assemble ``d omega / dR``."""
     transpose_action, pairs = make_hessian_transpose_action(tdobj)
     rhs = pack_m_matrix(m_matrix, pairs)
     zvector = solve_zvector(

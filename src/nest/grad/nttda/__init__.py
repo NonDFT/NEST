@@ -5,7 +5,6 @@ import numpy as np
 from pyscf import dft, lib
 from pyscf.grad import rhf as rhf_grad
 from pyscf.lib import logger
-from nest.ensemble_rks import EnsembleRKS
 from nest.nttda import NTTDA
 
 from . import delta_s_minus_one, delta_s_zero
@@ -27,8 +26,8 @@ def _copy_td_settings(source, target):
 
 
 def _displaced_reference(source, mol, fixed_grid):
-    if isinstance(source, EnsembleRKS):
-        reference = EnsembleRKS(mol, xc=source.xc, nopen=source.nopen)
+    if getattr(source, "is_average_occupation_reference", False):
+        reference = source.__class__(mol)
     elif isinstance(source, dft.KohnShamDFT):
         reference = dft.ROKS(mol)
     else:
@@ -53,7 +52,7 @@ def _displaced_reference(source, mol, fixed_grid):
 
 
 class Gradients(rhf_grad.GradientsBase):
-    """NTTDA gradients, including finite differences for EnsembleRKS."""
+    """NTTDA gradients, including finite differences for Dz0SCF references."""
 
     _keys = rhf_grad.GradientsBase._keys | {
         "state", "method", "step", "fixed_grid", "root_overlap_tol",
@@ -65,10 +64,7 @@ class Gradients(rhf_grad.GradientsBase):
         self.state = 1
         self.method = "analytic"
         self.step = 1e-3
-        self.fixed_grid = (
-            isinstance(tdobj._scf, dft.KohnShamDFT)
-            and not isinstance(tdobj._scf, EnsembleRKS)
-        )
+        self.fixed_grid = isinstance(tdobj._scf, dft.KohnShamDFT)
         self.root_overlap_tol = 0.5
         self.cphf_conv_tol = 1e-12
         self.cphf_max_cycle = None
@@ -141,7 +137,7 @@ class Gradients(rhf_grad.GradientsBase):
                 "NTTDA state tracking overlap %.6f is below %.6f" %
                 (overlaps[root], self.root_overlap_tol)
             )
-        return mf.e_tot + tdobj.e[root]
+        return float(tdobj.total_energies()[root])
 
     def _finite_difference(self, atmlst):
         coords0 = self.mol.atom_coords()

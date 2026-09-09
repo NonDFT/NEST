@@ -1,13 +1,10 @@
 #!/usr/bin/env python
-"""Orbital-response checks for average-occupation EnsembleRKS gradients."""
+"""Orbital-response checks for average-occupation Dz0SCF gradients."""
 
 import unittest
-from pathlib import Path
 
 import numpy as np
 from scipy.linalg import expm
-
-
 
 
 from pyscf import gto
@@ -27,11 +24,11 @@ from nest.grad.nttda.delta_s_minus_one import (  # noqa: E402
     grad_elec as spin_lowering_grad_elec,
     spin_lowering_ledger_scalar,
 )
-from nest.ensemble_rks import EnsembleRKS  # noqa: E402
+from nest.dz0scf import DZ0SCF  # noqa: E402
 from nest.nttda import NTTDA  # noqa: E402
 
 
-class EnsembleOrbitalResponse(unittest.TestCase):
+class Dz0SCFOrbitalResponse(unittest.TestCase):
     @staticmethod
     def make_reference():
         mol = gto.M(
@@ -42,8 +39,7 @@ class EnsembleOrbitalResponse(unittest.TestCase):
             unit="Bohr",
             verbose=0,
         )
-        mf = EnsembleRKS(mol).set(
-            xc="SVWN",
+        mf = DZ0SCF(mol, xc="SVWN").set(
             conv_tol=1e-13,
             conv_tol_grad=1e-10,
             max_cycle=100,
@@ -52,7 +48,7 @@ class EnsembleOrbitalResponse(unittest.TestCase):
         mf.grids.level = 0
         mf.kernel()
         if not mf.converged:
-            raise RuntimeError("EnsembleRKS reference did not converge")
+            raise RuntimeError("Dz0SCF reference did not converge")
         return mf
 
     @staticmethod
@@ -64,8 +60,7 @@ class EnsembleOrbitalResponse(unittest.TestCase):
             unit="Bohr",
             verbose=0,
         )
-        mf = EnsembleRKS(mol).set(
-            xc="SVWN",
+        mf = DZ0SCF(mol, xc="SVWN").set(
             conv_tol=1e-12,
             conv_tol_grad=1e-9,
             max_cycle=150,
@@ -74,8 +69,64 @@ class EnsembleOrbitalResponse(unittest.TestCase):
         mf.grids.level = 0
         mf.kernel()
         if not mf.converged:
-            raise RuntimeError("spin-one EnsembleRKS reference did not converge")
+            raise RuntimeError("spin-one Dz0SCF reference did not converge")
         return mf
+
+    @staticmethod
+    def _common_fock(mf, mo_coeff, mo_occ):
+        density = mf.make_rdm1(mo_coeff, mo_occ)
+        veff = mf.get_veff(mf.mol, density)
+        return mf.get_hcore() + veff[0]
+
+    def test_charge_response_tracks_a_reused_reference(self):
+        mol_a = gto.M(
+            atom="Li 0 0 0; H 0 0 3.0",
+            basis="sto-3g",
+            charge=1,
+            spin=1,
+            unit="Bohr",
+            verbose=0,
+        )
+        mf = DZ0SCF(mol_a, xc="SVWN").set(
+            conv_tol=1e-12,
+            conv_tol_grad=1e-9,
+            max_cycle=100,
+            verbose=0,
+        )
+        mf.grids.level = 0
+        mf.kernel()
+        rng = np.random.default_rng(7)
+        density = rng.standard_normal((mol_a.nao_nr(),) * 2)
+        density = 0.5 * (density + density.T)
+        response_a = mf.gen_response(hermi=1)(density)
+
+        mol_b = gto.M(
+            atom="Li 0 0 0; H 0 0 3.2",
+            basis="sto-3g",
+            charge=1,
+            spin=1,
+            unit="Bohr",
+            verbose=0,
+        )
+        mf.reset(mol_b)
+        mf.grids.level = 0
+        mf.kernel()
+        response_b = mf.gen_response(hermi=1)(density)
+
+        fresh = DZ0SCF(mol_b, xc="SVWN").set(
+            conv_tol=1e-12,
+            conv_tol_grad=1e-9,
+            max_cycle=100,
+            verbose=0,
+        )
+        fresh.grids.level = 0
+        fresh.kernel()
+        response_fresh = fresh.gen_response(hermi=1)(density)
+
+        np.testing.assert_allclose(
+            response_b, response_fresh, atol=1e-8, rtol=0,
+        )
+        self.assertGreater(np.max(np.abs(response_b - response_a)), 1e-4)
 
     def test_hessian_action_matches_orbital_rotation_finite_difference(self):
         mf = self.make_reference()
@@ -95,8 +146,7 @@ class EnsembleOrbitalResponse(unittest.TestCase):
         gradients = []
         for sign in (1.0, -1.0):
             displaced_mo = mo @ expm(sign * step * kappa)
-            density = mf.make_rdm1(displaced_mo, occ)
-            fock = mf.get_hcore() + mf.get_veff(mf.mol, density)
+            fock = self._common_fock(mf, displaced_mo, occ)
             gradients.append(mf.get_grad(displaced_mo, occ, fock))
         finite_difference = (gradients[0] - gradients[1]) / (2.0 * step)
 

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from pyscf import dft, lib
+from pyscf.grad import rhf as rhf_grad
 from nest.nttda import nttda as nttda_mod
 from nest.nttda.nttda import gen_rohf_response_sc
 
@@ -249,7 +250,7 @@ def _fock_response_q(tdobj, p_alpha, p_beta):
     """Reference-density derivative of a spin-resolved Fock scalar."""
     mf = tdobj._scf
     mo = np.asarray(mf.mo_coeff)
-    if getattr(mf, "is_ensemble_rks", False):
+    if getattr(mf, "is_average_occupation_reference", False):
         occupation = np.asarray(mf.mo_occ)
         probe = np.asarray(p_alpha) + np.asarray(p_beta)
         potential = mf.gen_response(hermi=0)(probe.T)
@@ -749,7 +750,7 @@ def _contract_derivative_terms(
 
 def _reference_spin_densities(tdobj):
     mf = tdobj._scf
-    if getattr(mf, "is_ensemble_rks", False):
+    if getattr(mf, "is_average_occupation_reference", False):
         return tuple(np.asarray(dm) for dm in mf.make_rdm1s())
     mo = np.asarray(mf.mo_coeff)
     return (
@@ -789,7 +790,7 @@ def spin_fock_direct_dft(
     p_total = p_alpha + p_beta
     density_alpha, density_beta = _reference_spin_densities(tdobj)
     gradient = np.zeros((len(p_alpha), len(atmlst), 3))
-    hcore_derivative = mf.nuc_grad_method().hcore_generator(mol)
+    hcore_derivative = rhf_grad.Gradients(mf).hcore_generator(mol)
     for k, atom in enumerate(atmlst):
         gradient[:, k] += lib.einsum(
             "npq,xpq->nx", p_total, hcore_derivative(atom),
@@ -830,7 +831,7 @@ def spin_fock_direct_dft(
             xctype
         )
     if (nobeta_p0 is not None and tdobj.nobeta
-            and not getattr(mf, "is_ensemble_rks", False)):
+            and not getattr(mf, "is_average_occupation_reference", False)):
         density0 = 0.5 * (density_alpha + density_beta)
         actual_probe_alpha = np.array(p_alpha, copy=True)
         actual_probe_beta = np.array(p_beta, copy=True)
@@ -885,7 +886,7 @@ def spin_fock_direct_hf(
     dm_alpha, dm_beta = _reference_spin_densities(tdobj)
     gradient = np.zeros((len(p_alpha), len(atmlst), 3))
 
-    hcore_derivative = tdobj._scf.nuc_grad_method().hcore_generator(mol)
+    hcore_derivative = rhf_grad.Gradients(tdobj._scf).hcore_generator(mol)
     for k, atom in enumerate(atmlst):
         gradient[:, k] += lib.einsum(
             "npq,xpq->nx", p_total, hcore_derivative(atom),
@@ -1094,7 +1095,7 @@ def grad_elec(
             jk_ledger=jk_ledger,
             output_slot=direct_slot,
         )
-        if getattr(mf, "is_ensemble_rks", False):
+        if getattr(mf, "is_average_occupation_reference", False):
             fockz_hfx = same_spin_fockz_hfx_terms(
                 gradient_driver,
                 tdobj,

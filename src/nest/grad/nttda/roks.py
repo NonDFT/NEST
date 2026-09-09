@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from pyscf import dft, lib
+from pyscf.grad import rhf as rhf_grad
 
 
 
@@ -28,9 +29,7 @@ def finish_gradient(
     ``direct_fock_probes`` enables one batched Fock-derivative evaluation: its
     contraction is the first result and the Z-vector contraction is the second.
     """
-    from nest.ensemble_rks import EnsembleRKS
-
-    if isinstance(tdobj._scf, EnsembleRKS):
+    if getattr(tdobj._scf, "is_average_occupation_reference", False):
         from .ensemble import finish_gradient as finish_ensemble_gradient
         return finish_ensemble_gradient(
             gradient_driver,
@@ -316,7 +315,7 @@ def _orbital_gradient(
         atmlst = range(mol.natm)
     atmlst = tuple(atmlst)
     mo = np.asarray(mf.mo_coeff)
-    overlap_derivative = mf.nuc_grad_method().get_ovlp(mol)
+    overlap_derivative = rhf_grad.Gradients(mf).get_ovlp(mol)
     offsets = mol.offset_nr_by_atom()
     result = np.zeros((len(atmlst), 3))
     for k, atom in enumerate(atmlst):

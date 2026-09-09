@@ -1,16 +1,16 @@
 #!/usr/bin/env python
-"""Finite-difference NTTDA gradients on an EnsembleRKS reference."""
+"""Finite-difference NTTDA gradients on a Dz0SCF reference."""
 
 import unittest
 
 import numpy as np
 
 from pyscf import gto
-from nest.ensemble_rks import EnsembleRKS
+from nest.dz0scf import DZ0SCF
 from nest.nttda import NTTDA
 
 
-class EnsembleRKSFiniteDifferenceGradient(unittest.TestCase):
+class Dz0SCFFiniteDifferenceGradient(unittest.TestCase):
     @staticmethod
     def make_td():
         mol = gto.M(
@@ -21,8 +21,7 @@ class EnsembleRKSFiniteDifferenceGradient(unittest.TestCase):
             unit="Bohr",
             verbose=0,
         )
-        mf = EnsembleRKS(mol).set(
-            xc="SVWN",
+        mf = DZ0SCF(mol, xc="SVWN").set(
             conv_tol=1e-12,
             conv_tol_grad=1e-9,
             max_cycle=100,
@@ -31,7 +30,7 @@ class EnsembleRKSFiniteDifferenceGradient(unittest.TestCase):
         mf.grids.level = 0
         mf.kernel()
         if not mf.converged:
-            raise RuntimeError("EnsembleRKS test reference did not converge")
+            raise RuntimeError("Dz0SCF test reference did not converge")
         tdobj = NTTDA(mf).set(
             deltaS=0,
             nstates=2,
@@ -48,12 +47,12 @@ class EnsembleRKSFiniteDifferenceGradient(unittest.TestCase):
             fixed_grid=False,
             root_overlap_tol=0.5,
         )
-        self.assertFalse(tdobj.Gradients().fixed_grid)
+        self.assertTrue(tdobj.Gradients().fixed_grid)
         from nest.grad.nttda import _displaced_reference
 
         displaced = _displaced_reference(tdobj._scf, tdobj.mol.copy(), False)
-        self.assertIsInstance(displaced, EnsembleRKS)
-        self.assertEqual(displaced.nopen, tdobj._scf.nopen)
+        self.assertTrue(
+            getattr(displaced, "is_average_occupation_reference", False))
         result = gradient.kernel(
             state=2,
             method="finite_diff",
@@ -63,8 +62,8 @@ class EnsembleRKSFiniteDifferenceGradient(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(result)))
         np.testing.assert_allclose(
             result,
-            [[0, 0, 0.09285896198862886],
-             [0, 0, -0.09285896198774068]],
+            [[0, 0, 0.091524381309104896],
+             [0, 0, -0.091524381308882852]],
             atol=2e-5,
             rtol=0,
         )
@@ -91,8 +90,7 @@ class EnsembleRKSFiniteDifferenceGradient(unittest.TestCase):
             unit="Bohr",
             verbose=0,
         )
-        mf = EnsembleRKS(mol).set(
-            xc="SVWN",
+        mf = DZ0SCF(mol, xc="SVWN").set(
             conv_tol=1e-11,
             max_cycle=150,
             verbose=0,
@@ -130,8 +128,7 @@ class EnsembleRKSFiniteDifferenceGradient(unittest.TestCase):
             unit="Bohr",
             verbose=0,
         )
-        mf = EnsembleRKS(mol).set(
-            xc="SVWN",
+        mf = DZ0SCF(mol, xc="SVWN").set(
             conv_tol=1e-12,
             conv_tol_grad=1e-9,
             max_cycle=150,
@@ -181,8 +178,7 @@ class EnsembleRKSFiniteDifferenceGradient(unittest.TestCase):
                     unit="Bohr",
                     verbose=0,
                 )
-                mf = EnsembleRKS(mol).set(
-                    xc=xc,
+                mf = DZ0SCF(mol, xc=xc).set(
                     conv_tol=1e-12,
                     conv_tol_grad=1e-9,
                     max_cycle=150,
