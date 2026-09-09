@@ -831,6 +831,7 @@ class NTTDA(TDBase):
         elif self.deltaS == -1:
             self.xy = [(xi.reshape(nocc, nvir), 0) for xi in x1]
             mask = abs(self.e) > 1e-8
+            self.converged = np.asarray(self.converged)[mask]
             self.e = self.e[mask]
             self.xy = [xy for xy, keep in zip(self.xy, mask) if keep]
             self.nstates = len(self.e)
