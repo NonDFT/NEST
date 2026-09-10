@@ -58,7 +58,25 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(abs(dip_outer - ref_outer).max(), 0, delta=1e-5)
         self.assertAlmostEqual(abs(td.oscillator_strength() - ref_f).max(), 0, delta=1e-5)
 
+    def test_svwn_sftddft_oscillator_strength(self):
+        mf = self.mol.UKS(xc='SVWN').run()
+        # References include both X and Y contributions, independently checked
+        # by contracting the occupied/virtual blocks with MO dipole integrals.
+        ref_dip = np.array([
+            [0.003507083925, -0.002819963562, 0.006121995290],
+            [-0.138088055687, 0.087342330714, -0.125251403979],
+            [0.287610742086, -0.153386582531, -0.015315643773],
+        ])
+        ref_f = np.array([0.000008046577, 0.006643398920, 0.017510757397])
+        td = mf.TDDFT_SF().set(nstates=4).run()
+        self.assertTrue(np.all(td.converged))
+        dip = td.transition_dipole()
+        dip_outer = np.einsum('nx,ny->nxy', dip.conj(), dip)
+        ref_outer = np.einsum('nx,ny->nxy', ref_dip.conj(), ref_dip)
+        self.assertAlmostEqual(abs(dip_outer - ref_outer).max(), 0, delta=1e-5)
+        self.assertAlmostEqual(abs(td.oscillator_strength() - ref_f).max(), 0, delta=1e-5)
+
 
 if __name__ == '__main__':
-    print('Full tests for SFTDA transition dipoles and oscillator strengths')
+    print('Full tests for SFTDA/SFTDDFT transition dipoles and oscillator strengths')
     unittest.main()

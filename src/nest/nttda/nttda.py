@@ -968,13 +968,20 @@ def transition_dm(tdobj, bra, ket):
 
 
 def transition_dipole(tdobj, ref=1, state=None):
-    """Return <ref|r|state> in length gauge, shape (nstates, 3).
+    """Return <ref|r|state> in length gauge, shape (n_targets, 3).
+
+    Targets exclude ref. With state=None, n_targets = len(tdobj.xy) - 1;
+    a single target returns shape (1, 3). Scalar state must differ from ref.
 
     Args:
         tdobj: NTTDA object with computed roots.
         ref: 1-based index of reference root.
         state: 1-based index or sequence of indices of target roots. None for all roots except ref.
     """
+    if not 1 <= ref <= len(tdobj.xy):
+        raise ValueError('ref must index a computed root (1-based)')
+    if np.isscalar(state) and state == ref:
+        raise ValueError('state must be different from ref')
     if state is None:
         states = np.arange(1, len(tdobj.xy) + 1)
     else:
@@ -999,6 +1006,10 @@ def oscillator_strength(tdobj, ref=1, state=None):
     retain negative energy differences. A scalar state returns a scalar;
     a sequence or None returns an array.
     """
+    if not 1 <= ref <= len(tdobj.xy):
+        raise ValueError('ref must index a computed root (1-based)')
+    if np.isscalar(state) and state == ref:
+        raise ValueError('state must be different from ref')
     if state is None:
         states = np.arange(1, len(tdobj.xy) + 1)
     else:
@@ -1007,7 +1018,10 @@ def oscillator_strength(tdobj, ref=1, state=None):
     dip = transition_dipole(tdobj, ref, states + 1)
     de = np.asarray(tdobj.e)[states] - tdobj.e[ref - 1]
     strength = (2. / 3.) * de * np.einsum('nx,nx->n', dip.conj(), dip).real
-    return strength[0] if np.isscalar(state) else strength
+    if np.isscalar(state):
+        return strength[0]
+    else:
+        return strength
 
 
 NTTDA.transition_dipole = transition_dipole

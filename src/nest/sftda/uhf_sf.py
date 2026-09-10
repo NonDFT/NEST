@@ -727,6 +727,10 @@ def oscillator_strength(tdobj, ref=1, state=None):
             float or ndarray
             Oscillator strength(s) between the reference and target state(s).
     '''
+    if not 1 <= ref <= len(tdobj.xy):
+        raise ValueError('ref must index a computed root (1-based)')
+    if np.isscalar(state) and state == ref:
+        raise ValueError('state must be different from ref')
     if state is None:
         states = np.arange(tdobj.nstates) + 1
     else:
@@ -739,7 +743,7 @@ def oscillator_strength(tdobj, ref=1, state=None):
     states -= 1
     es = tdobj.e[states] - tdobj.e[ref]
     f = (2./3.) * lib.einsum('n,nx,nx->n', es, trans_dip.conj(), trans_dip).real
-    if isinstance(state, int):
+    if np.isscalar(state):
         return f[0]
     else:
         return f
@@ -747,8 +751,14 @@ def oscillator_strength(tdobj, ref=1, state=None):
 def transition_dipole(tdobj, ref=1, state=None):
     '''
     Transition dipole moments between excited states for Spin-flip TDDFT/TDA.
-    Only applicable to length gauge.
+    Only applicable to length gauge. Returns shape (n_targets, 3).
+    Targets exclude ref; state=None selects all other computed roots.
+    A single target returns shape (1, 3). Scalar state must differ from ref.
     '''
+    if not 1 <= ref <= len(tdobj.xy):
+        raise ValueError('ref must index a computed root (1-based)')
+    if np.isscalar(state) and state == ref:
+        raise ValueError('state must be different from ref')
     if state is None:
         states = np.arange(tdobj.nstates) + 1
     else:
