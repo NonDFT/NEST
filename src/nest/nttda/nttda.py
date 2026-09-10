@@ -831,6 +831,7 @@ class NTTDA(TDBase):
         elif self.deltaS == -1:
             self.xy = [(xi.reshape(nocc, nvir), 0) for xi in x1]
             mask = abs(self.e) > 1e-8
+            self.converged = np.asarray(self.converged)[mask]
             self.e = self.e[mask]
             self.xy = [xy for xy, keep in zip(self.xy, mask) if keep]
             self.nstates = len(self.e)
@@ -848,6 +849,183 @@ class NTTDA(TDBase):
     gen_vind_sfu = gen_vind_sfu
     gen_vind_sc = gen_vind_sc
     gen_vind_sfd = gen_vind_sfd
+
+
+def _unpack_amplitudes(tdobj, state, nc, no, nv):
+    """Return CO[i,u], CV[i,a], OO[u,t], OV[u,a], CV0[i,a].
+
+    Formula labels are CO(ui), CV(ai), OO(tu), OV(au), CV0(ai).
+    For deltaS=0 OO is a scalar; for deltaS=+1 only CV is present.
+    """
+    x, _ = tdobj.xy[state]
+    x = np.asarray(x)
+    if tdobj.deltaS == 1:
+        return None, x.reshape(nc, nv), None, None, None
+    if tdobj.deltaS == 0:
+        slices = _sc_vector_slices(nc, no, nv)
+        x = x.reshape(slices['CV(0)'].stop)
+        return (x[slices['CO(1)']].reshape(nc, no),
+                x[slices['CV(1)']].reshape(nc, nv),
+                x[slices['OO(1)']][0],
+                x[slices['OV(1)']].reshape(no, nv),
+                x[slices['CV(0)']].reshape(nc, nv))
+    if tdobj.deltaS == -1:
+        x = x.reshape(nc + no, no + nv)
+        return x[:nc, :no], x[:nc, no:], x[nc:, :no], x[nc:, no:], None
+    raise ValueError('deltaS should be -1, 0, or 1')
+
+
+def transition_dm(tdobj, bra, ket):
+    """MO matrix gamma[p,q] = <bra|E_pq|ket>, for distinct orthogonal roots.
+
+    Indices here are zero-based. The reference-occupation term vanishes by
+    orthogonality; this is not a diagonal state density matrix.
+    """
+    cs, os, vs = _orbital_indices(tdobj)
+    nc, no, nv = len(cs), len(os), len(vs)
+    s = no * 0.5
+    m = _unpack_amplitudes(tdobj, bra, nc, no, nv)
+    m_co, m_cv, m_oo, m_ov, m_cv0 = (None if b is None else b.conj() for b in m)
+    n_co, n_cv, n_oo, n_ov, n_cv0 = _unpack_amplitudes(tdobj, ket, nc, no, nv)
+    nmo = len(tdobj._scf.mo_occ)
+    gamma = np.zeros((nmo, nmo), dtype=np.result_type(tdobj.xy[bra][0], tdobj.xy[ket][0]))
+    cc, oo, vv = np.ix_(cs, cs), np.ix_(os, os), np.ix_(vs, vs)
+    co, oc = np.ix_(cs, os), np.ix_(os, cs)
+    ov, vo = np.ix_(os, vs), np.ix_(vs, os)
+    cv, vc = np.ix_(cs, vs), np.ix_(vs, cs)
+
+    if tdobj.deltaS == 1:
+        # S+1,S+1: CV(ai)-CV(bj), stored [i,a], [j,b]
+        gamma[cc] -= lib.einsum('ia,ja->ji', m_cv, n_cv)
+        gamma[vv] += lib.einsum('ia,ib->ab', m_cv, n_cv)
+
+    elif tdobj.deltaS == 0:
+        # S,S sector. OO is a scalar; CO[i,u], CV[i,a], OV[u,a], CV0[i,a]
+        f = np.sqrt((s + 1) / (2 * s))
+
+        # OO-CO, OO-OV, OO-CV0 and conjugate
+        gamma[co] -= m_oo * n_co
+        gamma[oc] -= m_co.T * n_oo
+        gamma[ov] += m_oo * n_ov
+        gamma[vo] += m_ov.T * n_oo
+        gamma[cv] -= np.sqrt(2) * m_oo * n_cv0
+        gamma[vc] -= np.sqrt(2) * m_cv0.T * n_oo
+
+        # CO(ui)-CO(vj)
+        gamma[oo] += lib.einsum('iu,iv->uv', m_co, n_co)
+        gamma[cc] -= lib.einsum('iu,ju->ji', m_co, n_co)
+        # CV(ai)-CV(bj)
+        gamma[cc] -= lib.einsum('ia,ja->ji', m_cv, n_cv)
+        gamma[vv] += lib.einsum('ia,ib->ab', m_cv, n_cv)
+        # OV(au)-OV(bv)
+        gamma[oo] -= lib.einsum('ua,va->vu', m_ov, n_ov)
+        gamma[vv] += lib.einsum('ua,ub->ab', m_ov, n_ov)
+        # CV0(ai)-CV0(bj)
+        gamma[cc] -= lib.einsum('ia,ja->ji', m_cv0, n_cv0)
+        gamma[vv] += lib.einsum('ia,ib->ab', m_cv0, n_cv0)
+
+        # CO-CV, OV-CV and conjugate matrix elements
+        gamma[ov] += f * lib.einsum('iu,ib->ub', m_co, n_cv)
+        gamma[vo] += f * lib.einsum('ia,iv->av', m_cv, n_co)
+        gamma[co] -= f * lib.einsum('ua,ja->ju', m_ov, n_cv)
+        gamma[oc] -= f * lib.einsum('ia,va->vi', m_cv, n_ov)
+        # CO-CV0 and OV-CV0
+        gamma[ov] += lib.einsum('iu,ib->ub', m_co, n_cv0) / np.sqrt(2)
+        gamma[vo] += lib.einsum('ia,iv->av', m_cv0, n_co) / np.sqrt(2)
+        gamma[co] += lib.einsum('ua,ja->ju', m_ov, n_cv0) / np.sqrt(2)
+        gamma[oc] += lib.einsum('ia,va->vi', m_cv0, n_ov) / np.sqrt(2)
+
+    elif tdobj.deltaS == -1:
+        # S-1,S-1 sector. OO(tu) is stored [u,t], not formula order
+        a = np.sqrt(2 * s / (2 * s - 1))
+        b = 1 / np.sqrt(2 * s * (2 * s - 1))
+        f = np.sqrt((2 * s + 1) / (2 * s))
+
+        # OO(tu)-OO(vw): stored [u,t], [w,v]
+        gamma[oo] += lib.einsum('ut,uv->tv', m_oo, n_oo)
+        gamma[oo] -= lib.einsum('ut,wt->wu', m_oo, n_oo)
+        # CO(ui)-CO(vj): stored [i,u], [j,v]
+        gamma[oo] += lib.einsum('iu,iv->uv', m_co, n_co)
+        gamma[cc] -= lib.einsum('iu,ju->ji', m_co, n_co)
+        # CV(ai)-CV(bj): stored [i,a], [j,b]
+        gamma[cc] -= lib.einsum('ia,ja->ji', m_cv, n_cv)
+        gamma[vv] += lib.einsum('ia,ib->ab', m_cv, n_cv)
+        # OV(au)-OV(bv): stored [u,a], [v,b]
+        gamma[oo] -= lib.einsum('ua,va->vu', m_ov, n_ov)
+        gamma[vv] += lib.einsum('ua,ub->ab', m_ov, n_ov)
+
+        # OO-CO / OO-OV and conjugate; trace terms use stored OO diagonals
+        gamma[co] += -a * lib.einsum('ut,jt->ju', m_oo, n_co) + b * np.trace(m_oo) * n_co
+        gamma[oc] += -a * lib.einsum('iu,wu->wi', m_co, n_oo) + b * m_co.T * np.trace(n_oo)
+        gamma[ov] += a * lib.einsum('ut,ub->tb', m_oo, n_ov) - b * np.trace(m_oo) * n_ov
+        gamma[vo] += a * lib.einsum('ua,uv->av', m_ov, n_oo) - b * m_ov.T * np.trace(n_oo)
+        # CO-CV and OV-CV, including conjugate matrix elements
+        gamma[ov] += f * lib.einsum('iu,ib->ub', m_co, n_cv)
+        gamma[vo] += f * lib.einsum('ia,iv->av', m_cv, n_co)
+        gamma[co] -= f * lib.einsum('ua,ja->ju', m_ov, n_cv)
+        gamma[oc] -= f * lib.einsum('ia,va->vi', m_cv, n_ov)
+    return gamma
+
+
+def transition_dipole(tdobj, ref=1, state=None):
+    """Return <ref|r|state> in length gauge, shape (n_targets, 3).
+
+    Targets exclude ref. With state=None, n_targets = len(tdobj.xy) - 1;
+    a single target returns shape (1, 3). Scalar state must differ from ref.
+
+    Args:
+        tdobj: NTTDA object with computed roots.
+        ref: 1-based index of reference root.
+        state: 1-based index or sequence of indices of target roots. None for all roots except ref.
+    """
+    if not 1 <= ref <= len(tdobj.xy):
+        raise ValueError('ref must index a computed root (1-based)')
+    if np.isscalar(state) and state == ref:
+        raise ValueError('state must be different from ref')
+    if state is None:
+        states = np.arange(1, len(tdobj.xy) + 1)
+    else:
+        states = np.atleast_1d(state).astype(int)
+    states = states[states != ref] - 1
+    mf = tdobj._scf
+    coeff = np.asarray(mf.mo_coeff)
+    dip_ao = mf.mol.intor_symmetric('int1e_r', comp=3)
+    dip_mo = lib.einsum('up,xuv,vq->xpq', coeff.conj(), dip_ao, coeff)
+    dtype = np.result_type(dip_mo, tdobj.xy[ref - 1][0], *[tdobj.xy[i][0] for i in states])
+    pol = np.empty((len(states), 3), dtype=dtype)
+    for row, ket in enumerate(states):
+        gamma = transition_dm(tdobj, ref - 1, ket)
+        pol[row] = lib.einsum('pq,xpq->x', gamma, dip_mo)
+    return pol
+
+
+def oscillator_strength(tdobj, ref=1, state=None):
+    """Length-gauge oscillator strengths between computed NTTDA roots.
+
+    Uses the same 1-based indices as transition_dipole. Downward transitions
+    retain negative energy differences. A scalar state returns a scalar;
+    a sequence or None returns an array.
+    """
+    if not 1 <= ref <= len(tdobj.xy):
+        raise ValueError('ref must index a computed root (1-based)')
+    if np.isscalar(state) and state == ref:
+        raise ValueError('state must be different from ref')
+    if state is None:
+        states = np.arange(1, len(tdobj.xy) + 1)
+    else:
+        states = np.atleast_1d(state).astype(int)
+    states = states[states != ref] - 1
+    dip = transition_dipole(tdobj, ref, states + 1)
+    de = np.asarray(tdobj.e)[states] - tdobj.e[ref - 1]
+    strength = (2. / 3.) * de * np.einsum('nx,nx->n', dip.conj(), dip).real
+    if np.isscalar(state):
+        return strength[0]
+    else:
+        return strength
+
+
+NTTDA.transition_dipole = transition_dipole
+NTTDA.oscillator_strength = oscillator_strength
 
 
 def _guess_wfnsym_id(tdobj, x_sym, x):
