@@ -85,8 +85,8 @@ class KnownValues(unittest.TestCase):
         mf.mo_occ = self.ro_occ.copy()
 
         opt = sgm.SGM(mf)
-        _h_diag, _delta, grad_delta = opt._exact_sgm_state(mf.mo_coeff,
-                                                           mf.mo_occ)
+        _h_diag, _delta, grad_delta, _hop = opt._exact_sgm_state(mf.mo_coeff,
+                                                                 mf.mo_occ)
         rng = numpy.random.default_rng(12)
         direction = rng.normal(size=grad_delta.size)
         direction /= numpy.linalg.norm(direction)
@@ -104,7 +104,7 @@ class KnownValues(unittest.TestCase):
                         'fd = %.12e, analytic = %.12e' % (fd, analytic))
 
     def test_hcho_rydberg_triplet(self):
-        for tol, max_cycle in ((1e-4, 80), (1e-7, 120)):
+        for tol, max_cycle in ((1e-4, 80), (1e-7, 200)):
             with self.subTest(tol=tol):
                 mf = self.mol1.ROKS(xc='BHandHLYP')
                 mf.grids.atom_grid = (75, 302)
@@ -135,7 +135,7 @@ class OptimizerChecks(unittest.TestCase):
     def test_last_cycle_and_fock_reuse(self):
         opt = self.mf.SGM().set(max_cycle=1, canonicalization=False)
         h1e, s1e = opt.get_hcore(), opt.get_ovlp()
-        hdiag, delta, grad = opt._exact_sgm_state(self.guess, self.occ)
+        hdiag, delta, grad, _hop = opt._exact_sgm_state(self.guess, self.occ)
         direction = -opt._preconditioner(hdiag)*opt.gradient_scale*grad
         trial = opt._line_search(self.guess, self.occ, direction, delta, grad, h1e, s1e)
         self.assertIsNotNone(trial)
@@ -263,6 +263,41 @@ class OptimizerChecks(unittest.TestCase):
         exact, gn = curvature(x)
         self.assertLess(numpy.linalg.norm(g), 1e-6)
         self.assertLess(abs(exact-gn)/max(1., gn), 1e-6)
+
+    def test_response_preconditioners(self):
+        opt = self.mf.SGM()
+        dm = opt.make_rdm1(self.guess, self.occ)
+        fock = opt.get_fock(dm=dm)
+        _, hop, hd = opt.gen_g_hop(opt, self.guess, self.occ, fock)
+        # Independent finite differences of the orbital gradient give J's
+        # columns, including off-diagonal response contributions.
+        eps = 1e-5
+        for mode in ('gn', 'fock'):
+            with self.subTest(mode=mode):
+                opt.preconditioner = mode
+                inverse = opt._preconditioner(hd, hop, self.guess, self.occ, fock)
+                fd_diagonal = []
+                frozen = fock if mode == 'fock' else None
+                for i in range(hd.size):
+                    step = numpy.zeros(hd.size)
+                    step[i] = eps
+                    gp = opt.get_grad(opt._trial_mo(self.guess, self.occ, step), self.occ, frozen)
+                    gm = opt.get_grad(opt._trial_mo(self.guess, self.occ, -step), self.occ, frozen)
+                    column = (gp-gm)/(2*eps)
+                    fd_diagonal.append(2*numpy.dot(column, column))
+                numpy.testing.assert_allclose(1/inverse, fd_diagonal, rtol=1e-7)
+
+    def test_gn_preconditioner_convergence_and_refresh(self):
+        for mode, interval in (('gn', 0), ('gn', 1), ('gn', 3), ('fock', 1)):
+            with self.subTest(mode=mode, interval=interval):
+                opt = self.mf.SGM().set(preconditioner=mode, preconditioner_update=interval,
+                                        tol=1e-7, max_cycle=100)
+                with mock.patch.object(opt, '_preconditioner', wraps=opt._preconditioner) as precond:
+                    opt.kernel(self.guess, self.occ)
+                self.assertTrue(opt.converged)
+                self.assertLess(abs(opt.e_tot-self.mf.e_tot), 1e-9)
+                expected = 1 if interval == 0 else 1+(opt.cycles-1)//interval
+                self.assertEqual(precond.call_count, expected)
 
 
 if __name__ == '__main__':

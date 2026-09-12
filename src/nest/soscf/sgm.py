@@ -284,6 +284,17 @@ class SGM(lib.StreamObject):
             this threshold relative to the initial or previous orbitals.
             Default 0.7 corresponds to a largest principal angle of about
             46 degrees. This is a diagnostic, not a state constraint.
+        preconditioner
+            'gap' (default) uses 2*h_diag**2. 'fock' retains the full Fock
+            commutator in J but omits density response; it needs no extra
+            response evaluations. 'gn' uses the exact diagonal
+            of 2*J.T@J, where J is the orbital-gradient Jacobian. This needs
+            one Hessian-vector product per orbital variable, but no third
+            derivatives and no stored full Hessian.
+        preconditioner_update
+            Refresh the 'gn' diagonal every this many accepted steps.
+            Default 1; 0 computes it only at the initial point. L-BFGS
+            updates still run every step. 'gap' and 'fock' are always refreshed.
 
     The returned object also inherits the input ROHF/ROKS class. Use
     mf.SGM().set(...).run(mo_coeff, mo_occ), or SGM(mf).kernel(...).
@@ -297,11 +308,14 @@ class SGM(lib.StreamObject):
     lbfgs_memory = getattr(__config__, 'sgm_lbfgs_memory', 8)
     gradient_scale = getattr(__config__, 'sgm_gradient_scale', 0.75)
     somo_overlap_tol = getattr(__config__, 'sgm_somo_overlap_tol', 0.7)
+    preconditioner = 'gap'
+    preconditioner_update = 1
     canonicalization = getattr(__config__,
                                'soscf_newton_ah_SOSCF_canonicalization', True)
 
     _keys = {'max_cycle', 'tol', 'lbfgs_memory', 'gradient_scale',
-             'canonicalization', 'somo_overlap_tol'}
+             'canonicalization', 'somo_overlap_tol', 'preconditioner',
+             'preconditioner_update'}
 
     gen_g_hop = staticmethod(gen_g_hop_rohf)
 
@@ -327,14 +341,48 @@ class SGM(lib.StreamObject):
                  self.tol if self.conv_tol_grad is None else self.conv_tol_grad)
         log.info('SGM gradient scale = %g', self.gradient_scale)
         log.info('SGM L-BFGS memory = %d', self.lbfgs_memory)
+        log.info('SGM preconditioner = %s', self.preconditioner)
+        if self.preconditioner == 'gn':
+            log.info('SGM preconditioner update interval = %d (0: initial only)',
+                     self.preconditioner_update)
         log.info('SGM SOMO overlap warning threshold = %g', self.somo_overlap_tol)
         log.info('SGM canonicalization = %s', self.canonicalization)
         return self
 
-    def _preconditioner(self, h_diag):
+    def _preconditioner(self, h_diag, h_op=None, mo_coeff=None, mo_occ=None, fock=None):
         # Diagonal, frozen-Fock approximation to 2*J.T@J for Delta = g.T@g.
         # J = d g / d kappa; this is not the full Delta Hessian away from g=0.
-        denom = numpy.maximum(2.0 * h_diag ** 2, _PRECOND_FLOOR)
+        denom = 2.0 * h_diag ** 2
+        if self.preconditioner == 'gn':
+            direction = numpy.zeros_like(h_diag)
+            for i in range(h_diag.size):
+                direction[i] = 1
+                column = h_op(direction)
+                denom[i] = 2.0 * numpy.dot(column, column)
+                direction[i] = 0
+        elif self.preconditioner == 'fock':
+            f = mo_coeff.T @ numpy.asarray((fock.focka, fock.fockb)) @ mo_coeff
+            occ = numpy.asarray((mo_occ > 0, mo_occ == 2))
+            masks = (~occ[:, :, None]) & occ[:, None, :]
+            unique = masks[0] | masks[1]
+            allowed = numpy.ones(h_diag.size, dtype=bool)
+            if self.mol.symmetry:
+                orbsym = hf_symm.get_orbsym(self.mol, mo_coeff)
+                allowed = (orbsym[:, None] == orbsym)[unique]
+            for index, (a, i) in enumerate(zip(*numpy.where(unique))):
+                if not allowed[index]:
+                    denom[index] = 0
+                    continue
+                # Column of J_F: [F, K_ai], evaluated using the two nonzero
+                # entries of K_ai instead of a dense matrix multiplication.
+                comm = numpy.zeros_like(f)
+                comm[:, :, i] += f[:, :, a]
+                comm[:, :, a] -= f[:, :, i]
+                comm[:, a, :] -= f[:, i, :]
+                comm[:, i, :] += f[:, a, :]
+                column = numpy.sum(comm * masks, axis=0)[unique] * allowed
+                denom[index] = 2.0 * numpy.dot(column, column)
+        denom = numpy.maximum(denom, _PRECOND_FLOOR)
         return numpy.minimum(1.0 / denom, _MAX_PRECOND)
 
     def _trial_mo(self, mo_coeff, mo_occ, step):
@@ -349,7 +397,7 @@ class SGM(lib.StreamObject):
         g_orb, h_op, h_diag = self.gen_g_hop(self, mo_coeff, mo_occ, fock_ao, h1e)
         delta = numpy.dot(g_orb, g_orb)
         grad_delta = 2.0 * h_op(g_orb)
-        return h_diag, delta, grad_delta
+        return h_diag, delta, grad_delta, h_op
 
     def _line_search(self, mo_coeff, mo_occ, direction, delta, grad_delta,
                      h1e, s1e):
@@ -405,6 +453,10 @@ class SGM(lib.StreamObject):
         tol = self.tol if self.conv_tol_grad is None else self.conv_tol_grad
         if not numpy.isfinite(self.gradient_scale) or self.gradient_scale <= 0:
             raise ValueError('gradient_scale must be finite and positive')
+        if self.preconditioner not in ('gap', 'fock', 'gn'):
+            raise ValueError("preconditioner must be 'gap', 'fock' or 'gn'")
+        if not isinstance(self.preconditioner_update, (int, numpy.integer)) or self.preconditioner_update < 0:
+            raise ValueError('preconditioner_update must be a nonnegative integer')
         self.dump_flags()
 
         mo_guess = mo_coeff.copy()
@@ -416,7 +468,7 @@ class SGM(lib.StreamObject):
         e_tot = self.energy_tot(dm, h1e, vhf)
 
         t0 = (logger.process_clock(), logger.perf_counter())
-        h_diag, delta, grad_delta = self._exact_sgm_state(mo_coeff, mo_occ, fock, h1e)
+        h_diag, delta, grad_delta, h_op = self._exact_sgm_state(mo_coeff, mo_occ, fock, h1e)
         opt_grad_delta = self.gradient_scale * grad_delta
 
         history = LBFGSHistory(self.lbfgs_memory, _CURVATURE_TOL)
@@ -429,7 +481,9 @@ class SGM(lib.StreamObject):
             if norm_g < tol:
                 break
 
-            h0_inv = self._preconditioner(h_diag)
+            if (cycle == 0 or self.preconditioner in ('gap', 'fock')
+                    or (self.preconditioner_update and cycle % self.preconditioner_update == 0)):
+                h0_inv = self._preconditioner(h_diag, h_op, mo_coeff, mo_occ, fock)
             direction = self._descent_direction(history, grad_delta,
                                                 opt_grad_delta, h0_inv, log,
                                                 cycle)
@@ -454,7 +508,7 @@ class SGM(lib.StreamObject):
             dm = self.make_rdm1(mo_trial, mo_occ)
             e_new = self.energy_tot(dm, h1e, vhf_new)
 
-            h_diag_new, delta_new, grad_delta_new = self._exact_sgm_state(
+            h_diag_new, delta_new, grad_delta_new, h_op = self._exact_sgm_state(
                 mo_trial, mo_occ, fock, h1e)
             opt_grad_delta_new = self.gradient_scale * grad_delta_new
 
