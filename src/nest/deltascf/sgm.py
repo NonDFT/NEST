@@ -115,92 +115,6 @@ def gen_g_hop_rohf(mf, mo_coeff, mo_occ, fock_ao=None, h1e=None,
     return g, h_op, h_diag
 
 
-def gen_delta_curvature_rohf(mf, mo_coeff, mo_occ, with_symmetry=True):
-    '''Analytic directional curvature of Delta = g.T@g for real RO orbitals.
-
-    Returns a callable curvature(x) -> (exact, gauss_newton), evaluated along
-    C(t) = C exp(t K(x)). The two values are 2*|g'|**2 + 2*g.T@g'' and
-    2*|g'|**2, respectively. They coincide at an orbital stationary point.
-
-    Supports ROHF and LDA/GGA ROKS (including hybrid exchange); NLC response
-    is omitted as in gen_g_hop_rohf. DFT requires third XC derivatives.
-    This is a diagnostic: one call computes two density responses and, for
-    DFT, a kxc contraction. It is not used by the SGM optimizer.
-    '''
-    if numpy.iscomplexobj(mo_coeff):
-        raise NotImplementedError('Delta curvature requires real orbitals')
-    mol = mf.mol
-    c = numpy.asarray(mo_coeff)
-    mo_occ = numpy.asarray(mo_occ)
-    occ = numpy.asarray((mo_occ > 0, mo_occ == 2), dtype=float)
-    masks = (occ[:, :, None] == 0) & (occ[:, None, :] > 0)
-    unique = masks[0] | masks[1]
-    allowed = numpy.ones(numpy.count_nonzero(unique), dtype=bool)
-    if with_symmetry and mol.symmetry:
-        orbsym = hf_symm.get_orbsym(mol, mo_coeff)
-        allowed = (orbsym[:, None] == orbsym)[unique]
-
-    def pack(f):
-        mat = numpy.where(masks[0], f[0], 0) + numpy.where(masks[1], f[1], 0)
-        return mat[unique] * allowed
-
-    dm0 = mf.make_rdm1(mo_coeff, mo_occ)
-    vhf = mf.get_veff(mol, dm0)
-    fock = c.T @ (mf.get_hcore() + vhf) @ c
-    g = pack(fock)
-    vind = mf.gen_response((mo_coeff, mo_coeff), tuple(occ), hermi=1, with_nlc=False)
-    xctype = 'HF'
-    if isinstance(mf, hf.KohnShamDFT):
-        ni = mf._numint
-        xctype = ni._xc_type(mf.xc)
-        if xctype not in ('HF', 'LDA', 'GGA'):
-            raise NotImplementedError('Delta curvature supports HF, LDA and GGA')
-        ni.libxc.test_deriv_order(mf.xc, 3, raise_error=True)
-
-    def curvature(x):
-        kappa = hf.unpack_uniq_var(numpy.asarray(x) * allowed, mo_occ)
-        # D(t) = C exp(tK) N exp(-tK) C.T.
-        dm1_mo = kappa * (occ[:, None, :] - occ[:, :, None])
-        dm2_mo = kappa @ dm1_mo - dm1_mo @ kappa
-        dm1 = c @ dm1_mo @ c.T
-        dm2 = c @ dm2_mo @ c.T
-        v1 = vind(dm1)
-        v2 = vind(dm2)
-
-        if xctype != 'HF':
-            # F'' = response(D'') + kxc[D', D']. eval_xc_eff differentiates
-            # with respect to rho and its Cartesian gradients, not sigma.
-            for ao, mask, weight, _ in ni.block_loop(mol, mf.grids, c.shape[0], 1):
-                ao_rho = ao[0] if xctype == 'LDA' else ao
-                rho0 = numpy.asarray([ni.eval_rho(mol, ao_rho, dm, mask, xctype, hermi=1)
-                                      for dm in dm0])
-                rho1 = numpy.asarray([ni.eval_rho(mol, ao_rho, dm, mask, xctype, hermi=1)
-                                      for dm in dm1])
-                kxc = ni.eval_xc_eff(mf.xc, rho0, deriv=3, xctype=xctype, spin=1)[3]
-                if xctype == 'LDA':
-                    rho1 = rho1[:, None, :]
-                wv = numpy.einsum('axbyczg,byg,czg->axg', kxc, rho1, rho1, optimize=True)
-                wv *= weight
-                for spin in range(2):
-                    if xctype == 'LDA':
-                        v2[spin] += ao[0].T @ (wv[spin, 0, :, None] * ao[0])
-                    else:
-                        wv[spin, 0] *= .5
-                        aow = numpy.einsum('xgi,xg->gi', ao, wv[spin])
-                        mat = ao[0].T @ aow
-                        v2[spin] += mat + mat.T
-
-        v1_mo = c.T @ v1 @ c
-        comm = fock @ kappa - kappa @ fock
-        g1 = pack(comm + v1_mo)
-        g2 = pack(comm @ kappa - kappa @ comm
-                  + 2*(v1_mo @ kappa - kappa @ v1_mo) + c.T @ v2 @ c)
-        gauss_newton = 2 * numpy.dot(g1, g1)
-        return gauss_newton + 2*numpy.dot(g, g2), gauss_newton
-
-    return curvature
-
-
 class LBFGSHistory:
     '''Bounded L-BFGS history for inverse-Hessian two-loop recursion.'''
 
@@ -275,8 +189,8 @@ class SGM(lib.StreamObject):
             Convergence threshold on sqrt(Delta), where Delta = g_orb.T@g_orb.
             An explicitly set PySCF conv_tol_grad takes precedence over tol.
         gradient_scale
-            Scalar c from the SGM paper.  Q-Chem's DeltaSCF driver uses 0.75
-            by default.  It scales the gradient seen by L-BFGS and the L-BFGS
+            Scalar c from the SGM paper (default here: 0.75).
+            It scales the gradient seen by L-BFGS and the L-BFGS
             y_k history; the line search still uses the true Delta directional
             derivative.
         somo_overlap_tol
@@ -284,17 +198,6 @@ class SGM(lib.StreamObject):
             this threshold relative to the initial or previous orbitals.
             Default 0.7 corresponds to a largest principal angle of about
             46 degrees. This is a diagnostic, not a state constraint.
-        preconditioner
-            'gap' (default) uses 2*h_diag**2. 'fock' retains the full Fock
-            commutator in J but omits density response; it needs no extra
-            response evaluations. 'gn' uses the exact diagonal
-            of 2*J.T@J, where J is the orbital-gradient Jacobian. This needs
-            one Hessian-vector product per orbital variable, but no third
-            derivatives and no stored full Hessian.
-        preconditioner_update
-            Refresh the 'gn' diagonal every this many accepted steps.
-            Default 1; 0 computes it only at the initial point. L-BFGS
-            updates still run every step. 'gap' and 'fock' are always refreshed.
 
     The returned object also inherits the input ROHF/ROKS class. Use
     mf.SGM().set(...).run(mo_coeff, mo_occ), or SGM(mf).kernel(...).
@@ -308,14 +211,11 @@ class SGM(lib.StreamObject):
     lbfgs_memory = getattr(__config__, 'sgm_lbfgs_memory', 8)
     gradient_scale = getattr(__config__, 'sgm_gradient_scale', 0.75)
     somo_overlap_tol = getattr(__config__, 'sgm_somo_overlap_tol', 0.7)
-    preconditioner = 'gap'
-    preconditioner_update = 1
     canonicalization = getattr(__config__,
                                'soscf_newton_ah_SOSCF_canonicalization', True)
 
     _keys = {'max_cycle', 'tol', 'lbfgs_memory', 'gradient_scale',
-             'canonicalization', 'somo_overlap_tol', 'preconditioner',
-             'preconditioner_update'}
+             'canonicalization', 'somo_overlap_tol'}
 
     gen_g_hop = staticmethod(gen_g_hop_rohf)
 
@@ -341,48 +241,14 @@ class SGM(lib.StreamObject):
                  self.tol if self.conv_tol_grad is None else self.conv_tol_grad)
         log.info('SGM gradient scale = %g', self.gradient_scale)
         log.info('SGM L-BFGS memory = %d', self.lbfgs_memory)
-        log.info('SGM preconditioner = %s', self.preconditioner)
-        if self.preconditioner == 'gn':
-            log.info('SGM preconditioner update interval = %d (0: initial only)',
-                     self.preconditioner_update)
         log.info('SGM SOMO overlap warning threshold = %g', self.somo_overlap_tol)
         log.info('SGM canonicalization = %s', self.canonicalization)
         return self
 
-    def _preconditioner(self, h_diag, h_op=None, mo_coeff=None, mo_occ=None, fock=None):
+    def _preconditioner(self, h_diag):
         # Diagonal, frozen-Fock approximation to 2*J.T@J for Delta = g.T@g.
         # J = d g / d kappa; this is not the full Delta Hessian away from g=0.
-        denom = 2.0 * h_diag ** 2
-        if self.preconditioner == 'gn':
-            direction = numpy.zeros_like(h_diag)
-            for i in range(h_diag.size):
-                direction[i] = 1
-                column = h_op(direction)
-                denom[i] = 2.0 * numpy.dot(column, column)
-                direction[i] = 0
-        elif self.preconditioner == 'fock':
-            f = mo_coeff.T @ numpy.asarray((fock.focka, fock.fockb)) @ mo_coeff
-            occ = numpy.asarray((mo_occ > 0, mo_occ == 2))
-            masks = (~occ[:, :, None]) & occ[:, None, :]
-            unique = masks[0] | masks[1]
-            allowed = numpy.ones(h_diag.size, dtype=bool)
-            if self.mol.symmetry:
-                orbsym = hf_symm.get_orbsym(self.mol, mo_coeff)
-                allowed = (orbsym[:, None] == orbsym)[unique]
-            for index, (a, i) in enumerate(zip(*numpy.where(unique))):
-                if not allowed[index]:
-                    denom[index] = 0
-                    continue
-                # Column of J_F: [F, K_ai], evaluated using the two nonzero
-                # entries of K_ai instead of a dense matrix multiplication.
-                comm = numpy.zeros_like(f)
-                comm[:, :, i] += f[:, :, a]
-                comm[:, :, a] -= f[:, :, i]
-                comm[:, a, :] -= f[:, i, :]
-                comm[:, i, :] += f[:, a, :]
-                column = numpy.sum(comm * masks, axis=0)[unique] * allowed
-                denom[index] = 2.0 * numpy.dot(column, column)
-        denom = numpy.maximum(denom, _PRECOND_FLOOR)
+        denom = numpy.maximum(2.0 * h_diag ** 2, _PRECOND_FLOOR)
         return numpy.minimum(1.0 / denom, _MAX_PRECOND)
 
     def _trial_mo(self, mo_coeff, mo_occ, step):
@@ -397,7 +263,7 @@ class SGM(lib.StreamObject):
         g_orb, h_op, h_diag = self.gen_g_hop(self, mo_coeff, mo_occ, fock_ao, h1e)
         delta = numpy.dot(g_orb, g_orb)
         grad_delta = 2.0 * h_op(g_orb)
-        return h_diag, delta, grad_delta, h_op
+        return h_diag, delta, grad_delta
 
     def _line_search(self, mo_coeff, mo_occ, direction, delta, grad_delta,
                      h1e, s1e):
@@ -453,10 +319,6 @@ class SGM(lib.StreamObject):
         tol = self.tol if self.conv_tol_grad is None else self.conv_tol_grad
         if not numpy.isfinite(self.gradient_scale) or self.gradient_scale <= 0:
             raise ValueError('gradient_scale must be finite and positive')
-        if self.preconditioner not in ('gap', 'fock', 'gn'):
-            raise ValueError("preconditioner must be 'gap', 'fock' or 'gn'")
-        if not isinstance(self.preconditioner_update, (int, numpy.integer)) or self.preconditioner_update < 0:
-            raise ValueError('preconditioner_update must be a nonnegative integer')
         self.dump_flags()
 
         mo_guess = mo_coeff.copy()
@@ -468,7 +330,7 @@ class SGM(lib.StreamObject):
         e_tot = self.energy_tot(dm, h1e, vhf)
 
         t0 = (logger.process_clock(), logger.perf_counter())
-        h_diag, delta, grad_delta, h_op = self._exact_sgm_state(mo_coeff, mo_occ, fock, h1e)
+        h_diag, delta, grad_delta = self._exact_sgm_state(mo_coeff, mo_occ, fock, h1e)
         opt_grad_delta = self.gradient_scale * grad_delta
 
         history = LBFGSHistory(self.lbfgs_memory, _CURVATURE_TOL)
@@ -481,9 +343,7 @@ class SGM(lib.StreamObject):
             if norm_g < tol:
                 break
 
-            if (cycle == 0 or self.preconditioner in ('gap', 'fock')
-                    or (self.preconditioner_update and cycle % self.preconditioner_update == 0)):
-                h0_inv = self._preconditioner(h_diag, h_op, mo_coeff, mo_occ, fock)
+            h0_inv = self._preconditioner(h_diag)
             direction = self._descent_direction(history, grad_delta,
                                                 opt_grad_delta, h0_inv, log,
                                                 cycle)
@@ -508,7 +368,7 @@ class SGM(lib.StreamObject):
             dm = self.make_rdm1(mo_trial, mo_occ)
             e_new = self.energy_tot(dm, h1e, vhf_new)
 
-            h_diag_new, delta_new, grad_delta_new, h_op = self._exact_sgm_state(
+            h_diag_new, delta_new, grad_delta_new = self._exact_sgm_state(
                 mo_trial, mo_occ, fock, h1e)
             opt_grad_delta_new = self.gradient_scale * grad_delta_new
 
@@ -528,7 +388,7 @@ class SGM(lib.StreamObject):
                 if min(somo_initial[-1], somo_previous[-1]) < self.somo_overlap_tol:
                     log.warn('SGM: SOMO subspace deviation at iter %d: '
                              'min overlap initial = %.6f, previous = %.6f '
-                             '(threshold %.3f); inspect state character',
+                             '(threshold %.3f)',
                              cycle, somo_initial[-1], somo_previous[-1], self.somo_overlap_tol)
 
             delta_e = e_new - e_tot
@@ -570,6 +430,8 @@ class SGM(lib.StreamObject):
         self.mo_energy = mo_energy
         self.e_tot = e_tot
         self._finalize()
+        if self.chkfile:
+            self.dump_chk(self.chkfile)
         return self.e_tot
 
     scf = kernel
