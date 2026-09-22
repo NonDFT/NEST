@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # Copyright 2026 The NEST Developers. All Rights Reserved.
+# Copyright 2014-2021 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,7 +24,7 @@ import scipy.linalg
 
 from pyscf import __config__, lib
 from pyscf.lib import logger
-from pyscf.scf import hf, hf_symm
+from pyscf.scf import addons, hf, hf_symm
 
 
 _ARMIJO_C1 = 1e-4
@@ -33,84 +34,90 @@ _PRECOND_FLOOR = 1e-12
 _MAX_PRECOND = 1e4
 
 
+# Adapted from PySCF PR #3448, commit e45d0fe9c201825dd6b7069ade7d6532b9952617.
+# https://github.com/pyscf/pyscf/pull/3448
 def gen_g_hop_rohf(mf, mo_coeff, mo_occ, fock_ao=None, h1e=None,
                    with_symmetry=True):
-    '''ROHF orbital gradient and full-K Hessian-vector product.'''
-    mol = mf.mol
+    '''ROHF orbital gradient and symmetric orbital Hessian action.'''
     mo_occ = numpy.asarray(mo_occ)
-    if h1e is None:
-        h1e = mf.get_hcore(mol)
-    if fock_ao is None or getattr(fock_ao, 'focka', None) is None:
-        dm0 = mf.make_rdm1(mo_coeff, mo_occ)
-        vhf = mf.get_veff(mol, dm0)
-        focka_ao = h1e + vhf[0]
-        fockb_ao = h1e + vhf[1]
-    else:
-        focka_ao, fockb_ao = fock_ao.focka, fock_ao.fockb
+    mol = mf.mol
+    mo_coeff0 = mo_coeff
+    if getattr(mf, '_scf', None) and mf._scf.mol != mol:
+        # TODO: construct vind with dual-basis treatment
+        mo_coeff = addons.project_mo_nr2nr(mf._scf.mol, mo_coeff, mol)
 
-    focka = reduce(numpy.dot, (mo_coeff.conj().T, focka_ao, mo_coeff))
-    fockb = reduce(numpy.dot, (mo_coeff.conj().T, fockb_ao, mo_coeff))
-    occidxa = mo_occ > 0
-    occidxb = mo_occ == 2
+    if getattr(fock_ao, 'focka', None) is None:
+        if getattr(mf, '_scf', None) and mf._scf.mol != mol:
+            h1e = mf.get_hcore(mol)
+        dm0 = mf.make_rdm1(mo_coeff, mo_occ)
+        fock_ao = mf.get_fock(h1e, dm=dm0)
+        focka = reduce(numpy.dot, (mo_coeff.conj().T, fock_ao.focka, mo_coeff))
+        fockb = reduce(numpy.dot, (mo_coeff.conj().T, fock_ao.fockb, mo_coeff))
+    else:
+        focka = reduce(numpy.dot, (mo_coeff0.conj().T, fock_ao.focka, mo_coeff0))
+        fockb = reduce(numpy.dot, (mo_coeff0.conj().T, fock_ao.fockb, mo_coeff0))
+    mo_occa = occidxa = mo_occ > 0
+    mo_occb = occidxb = mo_occ == 2
     viridxa = ~occidxa
     viridxb = ~occidxb
-    uniq_var_a = viridxa[:, None] & occidxa
-    uniq_var_b = viridxb[:, None] & occidxb
-    uniq_var = uniq_var_a | uniq_var_b
+    uniq_var_a = viridxa[:,None] & occidxa
+    uniq_var_b = viridxb[:,None] & occidxb
+    uniq_ab = uniq_var_a | uniq_var_b
+    nmo = mo_coeff.shape[-1]
+    orboa = mo_coeff[:,occidxa]
+    orbob = mo_coeff[:,occidxb]
+    orbva = mo_coeff[:,viridxa]
+    orbvb = mo_coeff[:,viridxb]
 
-    gmat = numpy.zeros_like(focka)
-    gmat[uniq_var_a] = focka[uniq_var_a]
-    gmat[uniq_var_b] += fockb[uniq_var_b]
-    g = gmat[uniq_var]
-
-    focka_diag = focka.diagonal().real
-    fockb_diag = fockb.diagonal().real
-    h_diag_mat = numpy.zeros_like(focka_diag[:, None] - focka_diag)
-    h_diag_mat[uniq_var_a] = (
-        focka_diag[:, None] - focka_diag)[uniq_var_a]
-    h_diag_mat[uniq_var_b] += (
-        fockb_diag[:, None] - fockb_diag)[uniq_var_b]
-    h_diag = h_diag_mat[uniq_var]
+    g = numpy.zeros_like(focka)
+    g[uniq_var_a] = focka[uniq_var_a]
+    g[uniq_var_b] += fockb[uniq_var_b]
+    g = g[uniq_ab]
+    ea = focka.diagonal().real
+    eb = fockb.diagonal().real
+    h_diag = numpy.zeros_like(focka.real)
+    h_diag[uniq_var_a] = (ea[:,None] - ea)[uniq_var_a]
+    h_diag[uniq_var_b] += (eb[:,None] - eb)[uniq_var_b]
+    h_diag = h_diag[uniq_ab]
 
     if with_symmetry and mol.symmetry:
         orbsym = hf_symm.get_orbsym(mol, mo_coeff)
-        sym_forbid = (orbsym[:, None] != orbsym)[uniq_var]
-        g = g.copy()
-        h_diag = h_diag.copy()
+        sym_forbid = (orbsym[:,None] != orbsym)[uniq_ab]
         g[sym_forbid] = 0
         h_diag[sym_forbid] = 0
 
-    mo_occ_a = occidxa.astype(numpy.double)
-    mo_occ_b = occidxb.astype(numpy.double)
-    vind = mf.gen_response((mo_coeff, mo_coeff), (mo_occ_a, mo_occ_b),
+    gmat = hf.unpack_uniq_var(g, mo_occ)
+    vind = mf.gen_response((mo_coeff,)*2, (mo_occa, mo_occb),
                            hermi=1, with_nlc=False)
 
     def h_op(x):
         if with_symmetry and mol.symmetry:
             x = x.copy()
             x[sym_forbid] = 0
-        kappa = hf.unpack_uniq_var(x, mo_occ)
-
-        dm1a_mo = kappa * (mo_occ_a[None, :] - mo_occ_a[:, None])
-        dm1b_mo = kappa * (mo_occ_b[None, :] - mo_occ_b[:, None])
-        dm1 = numpy.asarray((
-            reduce(numpy.dot, (mo_coeff, dm1a_mo, mo_coeff.conj().T)),
-            reduce(numpy.dot, (mo_coeff, dm1b_mo, mo_coeff.conj().T))))
+        x1 = numpy.zeros((nmo,nmo), dtype=x.dtype)
+        x1[uniq_ab] = x
+        x1a = x1[uniq_var_a].reshape(orbva.shape[1], orboa.shape[1])
+        x1b = x1[uniq_var_b].reshape(orbvb.shape[1], orbob.shape[1])
+        d1a = reduce(numpy.dot, (orbva, x1a, orboa.conj().T))
+        d1b = reduce(numpy.dot, (orbvb, x1b, orbob.conj().T))
+        dm1 = numpy.array((d1a+d1a.conj().T, d1b+d1b.conj().T))
         v1a, v1b = vind(dm1)
 
+        # Keep the shared rotation's oo/vv contributions for each spin.
+        kappa = hf.unpack_uniq_var(x, mo_occ)
         hmat_a = focka.dot(kappa) - kappa.dot(focka)
         hmat_b = fockb.dot(kappa) - kappa.dot(fockb)
         hmat_a += reduce(numpy.dot, (mo_coeff.conj().T, v1a, mo_coeff))
         hmat_b += reduce(numpy.dot, (mo_coeff.conj().T, v1b, mo_coeff))
-
-        out = numpy.zeros_like(focka)
-        out[uniq_var_a] = hmat_a[uniq_var_a]
-        out[uniq_var_b] += hmat_b[uniq_var_b]
-        out = out[uniq_var]
+        hx = numpy.zeros_like(hmat_a)
+        hx[uniq_var_a] = hmat_a[uniq_var_a]
+        hx[uniq_var_b] += hmat_b[uniq_var_b]
+        # Transport the moving-frame gradient back to the reference frame.
+        hx += .5 * (kappa.dot(gmat) - gmat.dot(kappa))
+        hx = hx[uniq_ab]
         if with_symmetry and mol.symmetry:
-            out = out.copy()
-            out[sym_forbid] = 0
-        return out
+            hx[sym_forbid] = 0
+        return hx
 
     return g, h_op, h_diag
 
@@ -222,8 +229,7 @@ class SGM(lib.StreamObject):
     def __new__(cls, mf):
         if isinstance(mf, SGM):
             return mf
-        assert isinstance(mf, hf.SCF)
-        if not mf.istype('ROHF'):
+        if not isinstance(mf, hf.SCF) or not mf.istype('ROHF'):
             raise NotImplementedError('SGM currently supports ROHF/ROKS objects')
         obj = object.__new__(cls)
         return lib.set_class(obj, (cls, mf.__class__))
@@ -233,6 +239,15 @@ class SGM(lib.StreamObject):
             return
         self.__dict__.update(mf.__dict__)
         self._scf = mf
+
+    def check_sanity(self):
+        if not numpy.isfinite(self.gradient_scale) or self.gradient_scale <= 0:
+            raise ValueError('gradient_scale must be finite and positive')
+        tol = self.tol if self.conv_tol_grad is None else self.conv_tol_grad
+        if not numpy.isfinite(tol) or tol <= 0:
+            raise ValueError('SGM gradient tolerance must be finite and positive')
+        super().check_sanity()
+        return self
 
     def dump_flags(self, verbose=None):
         super().dump_flags(verbose)
@@ -307,7 +322,11 @@ class SGM(lib.StreamObject):
         return direction
 
     def kernel(self, mo_coeff=None, mo_occ=None):
-        log = logger.new_logger(self, self.verbose)
+        if self.verbose >= logger.WARN:
+            self.check_sanity()
+        if self.verbose >= logger.INFO:
+            self.dump_flags()
+        log = logger.new_logger(self)
         if mo_coeff is None:
             mo_coeff = self.mo_coeff
         if mo_occ is None:
@@ -317,9 +336,6 @@ class SGM(lib.StreamObject):
         if mo_coeff is None:
             raise RuntimeError('mo_coeff must be specified for SGM')
         tol = self.tol if self.conv_tol_grad is None else self.conv_tol_grad
-        if not numpy.isfinite(self.gradient_scale) or self.gradient_scale <= 0:
-            raise ValueError('gradient_scale must be finite and positive')
-        self.dump_flags()
 
         mo_guess = mo_coeff.copy()
         h1e = self.get_hcore()

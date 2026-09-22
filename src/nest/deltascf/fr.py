@@ -22,6 +22,8 @@ frozen stage uses exact complementary-space diagonalization, rather than
 finite projector shifts in the paper's unrestricted spin channel.
 """
 
+import weakref
+
 import numpy as np
 from scipy.linalg import eigh
 from pyscf import lib, scf, symm
@@ -30,6 +32,8 @@ from pyscf.scf import hf
 
 
 def _set_imom(mf, mo_ref, setocc):
+    # Both occupation closures need access to mf, but must not own it.
+    mf = weakref.proxy(mf)
     scf.addons.mom_occ(mf, mo_ref, setocc)
     imom_occ = mf.get_occ
     if mf.mol.symmetry:
@@ -40,9 +44,7 @@ def _set_imom(mf, mo_ref, setocc):
         if not mf.mol.symmetry:
             occupations = imom_occ(mo_energy, mo_coeff)
         else:
-            # PySCF mom_occ ranks all orbitals together. Here retain the
-            # reference alpha/beta electron counts within each irrep, so
-            # overlap ranking cannot move electrons between symmetry blocks.
+            # Preserve the reference spin occupations within each irrep.
             if mo_coeff is None:
                 mo_coeff = mf.mo_coeff
             orbital_symmetry = mf.get_orbsym(mo_coeff)
@@ -68,25 +70,39 @@ def _set_imom(mf, mo_ref, setocc):
 
 
 class FR(lib.StreamObject):
-    """Freeze both singly occupied orbitals, relax the others, then run IMOM.
+    """Freeze both SOMOs, then release all orbitals with IMOM (ROHF/ROKS).
 
-    Use ``mf.FR().kernel(mo_coeff, mo_occ)`` on a plain ROHF/ROKS object.
-    Requires real S-orthonormal orbitals and spin=2. With symmetry enabled,
-    input orbitals must belong to individual irreps of an Abelian point
-    group (e.g. Cs, C2v, D2h). Both stages retain the initial alpha/beta
-    electron counts in each irrep. For linear molecules or atoms, select
-    an Abelian subgroup explicitly; Dooh, Coov and SO3 are not supported.
-    Both stages use ordinary SCF and fresh CDIIS histories, with no Hessian.
-    Energies always come from the physical Hamiltonian.
+    Requires spin=2 and real S-orthonormal input orbitals. With symmetry,
+    each orbital must have a definite irrep in an Abelian point group;
+    multiple orbitals may share an irrep. Dooh, Coov and SO3 are unsupported.
 
-    freeze_tol (default 1e-5) bounds PySCF's projected orbital-gradient norm;
-    freeze_max_cycle (100) bounds the frozen stage. Failure raises before
-    release. freeze_cycles/freeze_converged describe that stage; cycles and
-    converged describe release, governed by the usual SCF tolerances.
-    callback receives both stages, identified by env['fr_stage'].
-    PySCF's extra relaxed convergence check is disabled in both stages.
-    At INFO verbosity (verbose=4), stage starts and the final SOMO-subspace
-    overlap singular values relative to the input orbitals are logged.
+    Attributes:
+        freeze_tol : float
+            Frozen-stage orbital-gradient threshold. Default is 1e-5.
+        freeze_max_cycle : int
+            Maximum frozen-stage iterations. Default is 100.
+            Failure to converge raises before release starts.
+        conv_tol, conv_tol_grad : float
+            Energy and gradient thresholds for release; inherited from mf.
+        max_cycle : int
+            Maximum release iterations; inherited from mf.
+        callback : callable
+            Called after each iteration with the PySCF environment dict.
+            env['fr_stage'] is 'freeze' or 'release'. Default is None.
+
+    Saved results:
+        freeze_converged : bool
+            Whether the frozen stage converged.
+        freeze_cycles : int
+            Number of frozen-stage iterations.
+        converged, cycles
+            Convergence status and iteration count of the release stage.
+        e_tot, mo_energy, mo_coeff, mo_occ
+            Final energy, orbital energies, coefficients and occupations.
+
+    Examples:
+        >>> excited = mf.FR()
+        >>> excited.kernel(mo_coeff, mo_occ)
     """
 
     __name_mixin__ = 'FR'
@@ -107,10 +123,36 @@ class FR(lib.StreamObject):
         if mf is not self:
             self.__dict__.update(mf.__dict__)
 
+    def check_sanity(self):
+        if self.mol.spin != 2:
+            raise ValueError('FR requires spin=2')
+        if self.mol.symmetry and self.mol.groupname in ('Dooh', 'Coov', 'SO3'):
+            raise NotImplementedError('FR supports Abelian point groups; select an Abelian subgroup')
+        if not np.isfinite(self.freeze_tol) or self.freeze_tol <= 0:
+            raise ValueError('freeze_tol must be finite and positive')
+        if not isinstance(self.freeze_max_cycle, (int, np.integer)) or self.freeze_max_cycle < 1:
+            raise ValueError('freeze_max_cycle must be a positive integer')
+        super().check_sanity()
+        return self
+
+    def dump_flags(self, verbose=None):
+        super().dump_flags(verbose)
+        log = logger.new_logger(self, verbose)
+        log.info('FR freeze gradient tolerance = %g', self.freeze_tol)
+        log.info('FR freeze max_cycle = %d', self.freeze_max_cycle)
+        log.info('FR release occupation method = IMOM')
+        return self
+
     def kernel(self, mo_coeff=None, mo_occ=None):
+        if self.verbose >= logger.WARN:
+            self.check_sanity()
+        if self.verbose >= logger.INFO:
+            self.dump_flags()
+        log = logger.new_logger(self)
+
         c = np.array(self.mo_coeff if mo_coeff is None else mo_coeff, copy=True)
         occ = np.array(self.mo_occ if mo_occ is None else mo_occ, copy=True)
-        if (self.mol.spin != 2 or occ.ndim != 1 or
+        if (occ.ndim != 1 or
                 not np.all(np.isin(occ, [0, 1, 2])) or
                 np.count_nonzero(occ == 1) != 2 or occ.sum() != self.mol.nelectron):
             raise ValueError('FR requires a spin=2 occupation vector with exactly two SOMOs')
@@ -121,8 +163,6 @@ class FR(lib.StreamObject):
             raise ValueError('FR requires S-orthonormal input orbitals')
         orbital_symmetry = np.zeros(occ.size, dtype=int)
         if self.mol.symmetry:
-            if self.mol.groupname not in ('C1', 'Ci', 'Cs', 'C2', 'C2v', 'C2h', 'D2', 'D2h'):
-                raise NotImplementedError('FR supports Abelian point groups; select an Abelian subgroup')
             orbital_symmetry = symm.label_orb_symm(
                 self.mol, self.mol.irrep_id, self.mol.symm_orb, c, s=s, check=True)
             c = lib.tag_array(c, orbsym=orbital_symmetry)
@@ -135,8 +175,6 @@ class FR(lib.StreamObject):
                                else tuple(requested) == (alpha, beta))
                     if not matches:
                         raise ValueError('Input occupations conflict with irrep_nelec for ' + name)
-        if self.freeze_tol <= 0 or self.freeze_max_cycle < 1:
-            raise ValueError('freeze_tol and freeze_max_cycle must be positive')
 
         self.converged = False
         self.freeze_converged = False
@@ -156,8 +194,7 @@ class FR(lib.StreamObject):
                     mf.diis.rollback = self.diis_space_rollback
                     mf.diis.damp = self.diis_damp
                 else:
-                    # Let the ordinary kernel build its orthogonalized DIIS
-                    # residual, without carrying over the frozen history.
+                    # Start release with a fresh DIIS history.
                     mf.diis = True
                     mf.DIIS = scf.diis.CDIIS
             def stage_callback(env, stage=stage):
@@ -165,23 +202,18 @@ class FR(lib.StreamObject):
                     callback(dict(env, fr_stage=stage))
             mf.callback = stage_callback
 
-        # The two singly occupied columns never change during the freeze
-        # iterations. All other orbitals are linear combinations of the
-        # INITIAL doubly occupied and virtual columns, an S-orthonormal basis
-        # for the allowed space. Put occupied indices first: eigh returns
-        # increasing energies, so the lowest eigenvectors fill these slots.
+        # Exclude SOMOs; place doubly occupied slots before virtual slots.
         doubly_occupied_indices = np.flatnonzero(occ == 2)
         virtual_indices = np.flatnonzero(occ == 0)
         free_indices = np.concatenate((doubly_occupied_indices, virtual_indices))
         free_orbitals = c[:, free_indices]
         free_blocks = [free_indices[orbital_symmetry[free_indices] == irrep]
                        for irrep in np.unique(orbital_symmetry[free_indices])]
-        original_get_grad = frozen.get_grad
+        # Bind to the unmodified base, not the object that owns this closure.
+        original_get_grad = base.get_grad
 
         def frozen_eig(fock, overlap, **kwargs):
-            # In each free block B, B.T @ S @ B = I. Thus this is an ordinary
-            # eigenproblem, not an AO generalized eigenproblem. Separate
-            # irreps must not mix, even if their eigenvalues are degenerate.
+            # B.T @ S @ B = I; diagonalize each irrep separately.
             coeff = c.copy()
             energies = np.einsum('pi,pi->i', c, fock @ c)
             for indices in free_blocks:
@@ -194,16 +226,12 @@ class FR(lib.StreamObject):
             return energies, coeff
 
         def frozen_get_occ(mo_energy=None, mo_coeff=None):
-            # frozen_eig already placed the lowest free eigenvectors into
-            # the doubly occupied slots; keep the initial occupation labels.
+            # frozen_eig already orders the free orbitals by energy.
             return occ.copy()
 
         def frozen_get_grad(coeff, occupations, fock=None):
-            # PySCF packs all nonredundant ROHF rotations into a 1-D vector:
-            # alpha: occupied -> virtual; beta: doubly -> singly/virtual.
-            # Select only doubly occupied -> virtual entries of THAT vector.
-            # Derive masks from the supplied occupations because symmetry
-            # SCF can reorder orbitals during its finalization step.
+            # Select doubly occupied -> virtual entries in PySCF's packed gradient.
+            # Rebuild the mask because symmetry finalization can reorder orbitals.
             alpha_rotations = (occupations == 0)[:, None] & (occupations > 0)[None, :]
             beta_rotations = (occupations != 2)[:, None] & (occupations == 2)[None, :]
             all_rotations = alpha_rotations | beta_rotations
@@ -212,25 +240,17 @@ class FR(lib.StreamObject):
             gradient = original_get_grad(coeff, occupations, fock)
             return gradient[free_gradient_entries]
 
-        # These three hooks implement the constrained eigenproblem, filling,
-        # and convergence test. Density/Fock/energy updates stay in PySCF.
         frozen.eig = frozen_eig
         frozen.get_occ = frozen_get_occ
         frozen.get_grad = frozen_get_grad
         if frozen.diis:
-            # CDIIS must ignore rotations involving fixed singly occupied
-            # orbitals too. For the physical ROHF Fock, its virtual/doubly
-            # occupied block is (F_alpha + F_beta)/2. Multiplying by the
-            # occupation difference 2 gives exactly PySCF's orbital gradient:
-            # ||B.T @ (F D S - S D F) @ B||_F = sqrt(2) * ||g_free||_2,
-            # where D is the total (alpha + beta) density. The same-irrep
-            # restriction is applied by CDIIS using the orbsym tag below.
+            # Project the DIIS residual onto the free orbital space.
             if self.mol.symmetry:
                 free_orbitals = lib.tag_array(free_orbitals, orbsym=orbital_symmetry[free_indices])
             frozen.diis.Corth = free_orbitals
         frozen.conv_tol_grad = self.freeze_tol
         frozen.max_cycle = self.freeze_max_cycle
-        logger.info(self, 'FR Freeze stage begins: fix both singly occupied orbitals; '
+        log.info('FR Freeze stage begins: fix both singly occupied orbitals; '
                     'relax doubly occupied/virtual orbitals')
         frozen.kernel(dm0=frozen.make_rdm1(c, occ))
         self.freeze_cycles = frozen.cycles
@@ -238,26 +258,18 @@ class FR(lib.StreamObject):
         if not self.freeze_converged:
             raise RuntimeError('FR frozen SCF did not converge; release was not started')
 
-        # PySCF mom_occ captures these occupied reference spaces once (IMOM).
-        # Resetting the reference after freeze incorporates spectator relaxation.
-        logger.info(self, 'FR Release stage begins: relax all orbitals with the post-freeze IMOM reference')
-        # Symmetry SCF finalization sorts columns AND occupations. Use both
-        # returned arrays together, rather than reusing initial column labels.
+        log.info('FR Release stage begins: relax all orbitals with the post-freeze IMOM reference')
+        # Use the post-freeze reference, including symmetry reordering.
         setocc = np.asarray((frozen.mo_occ > 0, frozen.mo_occ == 2), dtype=float)
         _set_imom(release, frozen.mo_coeff, setocc)
         release.kernel(dm0=frozen.make_rdm1())
-        # With conv_check=False the ordinary kernel already checks energy
-        # AND orbital-gradient convergence. Honor its result, including any
-        # user-supplied check_convergence callback, without a second criterion.
-        # Retain the ordinary MF results and caches, but not stage-local hooks.
+        # Copy results without retaining stage-local hooks.
         for key, value in release.__dict__.items():
             if key not in ('callback', 'get_occ', 'diis', 'DIIS'):
                 self.__dict__[key] = value
         _set_imom(self, frozen.mo_coeff, setocc)
-        # Use the final occupation labels: IMOM and symmetry finalization
-        # can move the singly occupied orbitals to different column indices.
         somo_overlap = c[:, occ == 1].T @ s @ self.mo_coeff[:, self.mo_occ == 1]
-        logger.info(self, 'FR target SOMO overlap singular values: %s',
+        log.note('FR target SOMO overlap singular values: %s',
                     np.linalg.svd(somo_overlap, compute_uv=False))
         return self.e_tot
 
