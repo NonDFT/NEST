@@ -883,6 +883,10 @@ class NTTDA(TDBase):
         self._finalize()
         return self.e, self.xy
 
+    def get_ab(self):
+        from nest.nttda.get_ab import get_ab
+        return get_ab(self._scf, deltaS=self.deltaS, nobeta=self.nobeta)
+
     gen_vind_sfu = gen_vind_sfu
     gen_vind_sc = gen_vind_sc
     gen_vind_sfd = gen_vind_sfd
