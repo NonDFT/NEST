@@ -783,8 +783,6 @@ class NTTDA(TDBase):
             nstates = self.nstates
         else:
             self.nstates = nstates
-        if self.deltaS == -1:
-            nstates += 1
         log = logger.Logger(self.stdout, self.verbose)
 
         def all_eigs(w, v, nroots, envs):
@@ -794,11 +792,30 @@ class NTTDA(TDBase):
             vind, hdiag = self.gen_vind_sc()
             precond = self.get_precond(hdiag)
         elif self.deltaS == -1:
-            vind, hdiag = self.gen_vind_sfd()
-            precond = self.get_precond(hdiag)
+            base_vind, hdiag = self.gen_vind_sfd()
+            base_precond = self.get_precond(hdiag)
             csidx, osidx, vsidx = _orbital_indices(self)
-            nocc = len(csidx) + len(osidx)
-            nvir = len(osidx) + len(vsidx)
+            ncs, nos = len(csidx), len(osidx)
+            nocc = ncs + nos
+            nvir = nos + len(vsidx)
+            nstates = min(nstates, hdiag.size - 1)
+            self.nstates = nstates
+            open_diag = np.arange(nos)
+
+            def project(zs):
+                # Remove only the OO identity direction; keep the stored layout.
+                projected = np.array(zs, copy=True)
+                oo = projected.reshape(-1, nocc, nvir)[:, ncs:, :nos]
+                trace = np.trace(oo, axis1=1, axis2=2) / nos
+                oo[:, open_diag, open_diag] -= trace[:, None]
+                return projected
+
+            def vind(zs):
+                return project(base_vind(project(zs)))
+
+            def precond(residual, energy):
+                # Unequal diagonal denominators can reintroduce the OO trace.
+                return project(base_precond(residual, energy))
         elif self.deltaS == 1:
             vind, hdiag = self.gen_vind_sfu()
             precond = self.get_precond(hdiag)
@@ -811,6 +828,9 @@ class NTTDA(TDBase):
         x0sym = None
         if x0 is None:
             x0 = self.init_guess(hdiag)
+        if self.deltaS == -1:
+            # Davidson's initial QR removes dependencies introduced by projection.
+            x0 = project(x0)
 
         self.converged, self.e, x1 = lr_eigh(
             vind,
@@ -830,10 +850,6 @@ class NTTDA(TDBase):
             self.xy = [(xi, 0) for xi in x1]
         elif self.deltaS == -1:
             self.xy = [(xi.reshape(nocc, nvir), 0) for xi in x1]
-            mask = abs(self.e) > 1e-8
-            self.converged = np.asarray(self.converged)[mask]
-            self.e = self.e[mask]
-            self.xy = [xy for xy, keep in zip(self.xy, mask) if keep]
             self.nstates = len(self.e)
         elif self.deltaS == 1:
             self.xy = [(xi.reshape(ncs, nvs), 0) for xi in x1]

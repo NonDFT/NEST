@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import unittest
+from unittest.mock import patch
 import numpy as np
 from pyscf import gto
 from nest import nttda
@@ -110,6 +111,78 @@ class KnownValues(unittest.TestCase):
         td = mf.NTTDA().set(nstates=2, deltaS=-1, nobeta=False).run()
         self.assertTrue(np.all(td.converged))
         self.assertAlmostEqual(abs(td.e - ref).max(), 0, delta=1e-6)
+
+    def test_hf_nttda_projected_guess(self):
+        mf = self.mol.ROKS(xc='HF').run()
+        td = mf.NTTDA().set(nstates=2, deltaS=-1, nobeta=False, conv_tol=1e-6)
+        vind, hdiag = td.gen_vind_sfd()
+        nc = np.count_nonzero(mf.mo_occ == 2)
+        no = np.count_nonzero(mf.mo_occ == 1)
+        nv = np.count_nonzero(mf.mo_occ == 0)
+
+        # The normalized OO identity is a null vector of the original operator.
+        q = np.zeros((nc + no, no + nv))
+        q[nc:, :no] = np.eye(no) / np.sqrt(no)
+        self.assertAlmostEqual(np.linalg.norm(vind(q.ravel())), 0, delta=1e-12)
+
+        # Deliberately add this redundant direction to every initial guess.
+        x0 = td.init_guess(hdiag) + q.ravel()
+        original = x0.copy()
+        td.kernel(x0=x0)
+
+        ref = np.array([-0.25588162251385815, 0.03179164805915535])
+        self.assertTrue(np.all(td.converged))
+        self.assertEqual(td.nstates, 2)
+        self.assertEqual(len(td.xy), 2)
+        self.assertAlmostEqual(abs(td.e - ref).max(), 0, delta=1e-6)
+        self.assertEqual(abs(x0 - original).max(), 0)
+        for energy, (x, _) in zip(td.e, td.xy):
+            self.assertAlmostEqual(np.trace(x[nc:, :no]), 0, delta=1e-12)
+            residual = vind(x.ravel()).ravel() - energy * x.ravel()
+            self.assertLess(np.linalg.norm(residual), td.conv_tol)
+
+    def test_nttda_physical_zero_root(self):
+        # Two open orbitals, no core or virtual orbitals: amplitudes are OO only.
+        mol = gto.M(atom='H 0 0 0; H 0 0 1', spin=2, basis='sto-3g', verbose=0)
+        mf = mol.ROKS(xc='HF').run()
+        td = mf.NTTDA().set(deltaS=-1)
+
+        # Coordinates: (X_00, X_01, X_10, X_11).
+        # (1, 0, 0, 1) is the redundant zero mode.
+        # The traceless directions have eigenvalues -2, -1, 0, respectively.
+        matrix = np.array([
+            [-1.,  0., 0.,  1.],
+            [ 0., -1., 0.,  0.],
+            [ 0.,  0., 0.,  0.],
+            [ 1.,  0., 0., -1.],
+        ])
+
+        def vind(zs):
+            return np.asarray(zs) @ matrix.T
+
+        with patch.object(td, 'gen_vind_sfd', return_value=(vind, matrix.diagonal().copy())):
+            # A negative target root must not cause an extra root to be returned.
+            td.kernel(nstates=1)
+            self.assertTrue(np.all(td.converged))
+            self.assertEqual(td.nstates, 1)
+            self.assertEqual(len(td.e), 1)
+            self.assertAlmostEqual(td.e[0], -2, delta=1e-12)
+
+            # Keep the physical zero root; remove only the OO identity direction.
+            ref = np.array([-2., -1., 0.])
+            td.kernel(nstates=3)
+            self.assertTrue(np.all(td.converged))
+            self.assertEqual(td.nstates, 3)
+            self.assertAlmostEqual(abs(td.e - ref).max(), 0, delta=1e-12)
+            for x, _ in td.xy:
+                self.assertAlmostEqual(np.trace(x), 0, delta=1e-12)
+
+            # Four stored coordinates contain only three physical directions.
+            td.kernel(nstates=4)
+            self.assertTrue(np.all(td.converged))
+            self.assertEqual(td.nstates, 3)
+            self.assertEqual(len(td.xy), 3)
+            self.assertAlmostEqual(abs(td.e - ref).max(), 0, delta=1e-12)
 
 
 if __name__ == '__main__':
