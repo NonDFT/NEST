@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import io
 import unittest
 from unittest.mock import patch
 import numpy as np
-from pyscf import gto
+from pyscf import dft, gto
+from pyscf.lib import logger
 from nest import nttda
 
 
@@ -140,6 +142,54 @@ class KnownValues(unittest.TestCase):
             self.assertAlmostEqual(np.trace(x[nc:, :no]), 0, delta=1e-12)
             residual = vind(x.ravel()).ravel() - energy * x.ravel()
             self.assertLess(np.linalg.norm(residual), td.conv_tol)
+
+    def test_nttda_check_sanity(self):
+        mf = self.mol.ROKS(xc='HF').run()
+        td = mf.NTTDA()
+        self.assertIs(td.check_sanity(), td)
+
+        td.deltaS = 2
+        with self.assertRaisesRegex(ValueError, 'deltaS must be'):
+            td.check_sanity()
+        with self.assertRaisesRegex(ValueError, 'deltaS must be'):
+            td.kernel()
+        td.deltaS = -1
+        with self.assertRaisesRegex(ValueError, 'nstates must be a positive integer'):
+            td.kernel(nstates=0)
+        with self.assertRaisesRegex(ValueError, 'nstates must be a positive integer'):
+            td.kernel(nstates=1.5)
+
+        mol = gto.M(atom='H 0 0 0', spin=1, basis='sto-3g', verbose=0)
+        td = mol.ROKS(xc='HF').run().NTTDA()
+        with self.assertRaisesRegex(AssertionError, 'Si>=1'):
+            td.kernel()
+
+        mol = gto.M(atom='He 0 0 0', basis='sto-3g', verbose=0)
+        td = dft.roks.ROKS(mol, xc='HF').run().NTTDA().set(deltaS=0)
+        with self.assertRaisesRegex(AssertionError, 'Si>=1/2'):
+            td.kernel()
+
+    def test_nttda_dump_flags(self):
+        mf = self.mol.ROKS(xc='HF').run()
+        td = mf.NTTDA().set(deltaS=-1, nobeta=True)
+        with io.StringIO() as output:
+            td.stdout = output
+            self.assertIs(td.dump_flags(verbose=logger.INFO), td)
+            text = output.getvalue()
+            self.assertIn('deltaS = -1 (Si = 1 -> Sf = 0)', text)
+            self.assertIn('Numerical stabilization enabled', text)
+            self.assertIn('low local beta-electron density', text)
+            self.assertIn('Redundant zero-energy state excluded from the excitation calculation', text)
+            self.assertNotIn('singlet', text)
+
+            output.seek(0)
+            output.truncate()
+            td.nobeta = False
+            td.verbose = logger.INFO
+            td.kernel(nstates=1)
+            self.assertTrue(np.all(td.converged))
+            self.assertIn('nstates = 1', output.getvalue())
+            self.assertNotIn('Numerical stabilization enabled', output.getvalue())
 
     def test_nttda_physical_zero_root(self):
         # Two open orbitals, no core or virtual orbitals: amplitudes are OO only.

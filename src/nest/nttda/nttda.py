@@ -633,7 +633,7 @@ def gen_vind_sfd(td):
     virt_cols = slice(nos, None)
 
     s = nos * 0.5
-    assert s >= 0.5, 'NTTDA for Sf=Si-1 only supports case that Si>=1.'
+    assert s >= 1, 'NTTDA for Sf=Si-1 only supports case that Si>=1.'
     assert s == (mf.mol.nelec[0] - mf.mol.nelec[1]) * 0.5
 
     log = logger.new_logger(td)
@@ -761,8 +761,29 @@ class NTTDA(TDBase):
 
     deltaS = -1
     nobeta = False
+    singlet = None
 
     _keys = {'deltaS', 'nobeta'}
+
+    def dump_flags(self, verbose=None):
+        TDBase.dump_flags(self, verbose)
+        log = logger.new_logger(self, verbose)
+        s = self.mol.spin * 0.5
+        log.info('deltaS = %s (Si = %g -> Sf = %g)', self.deltaS, s, s + self.deltaS)
+        if self.nobeta:
+            log.info('Numerical stabilization enabled to avoid potential divergence '
+                     'at low local beta-electron density')
+        if self.deltaS == -1:
+            log.info('Redundant zero-energy state excluded from the excitation calculation')
+        return self
+
+    def check_sanity(self):
+        if self.deltaS not in (-1, 0, 1):
+            raise ValueError('deltaS must be -1, 0, or 1')
+        if not isinstance(self.nstates, (int, np.integer)) or self.nstates <= 0:
+            raise ValueError('nstates must be a positive integer')
+        TDBase.check_sanity(self)
+        return self
 
     def init_guess(self, hdiag, nstates=None):
         if nstates is None:
@@ -776,14 +797,16 @@ class NTTDA(TDBase):
     def kernel(self, x0=None, nstates=None):
         cpu0 = (logger.process_clock(), logger.perf_counter())
 
-        self.check_sanity()
-        self.dump_flags()
-
         if nstates is None:
             nstates = self.nstates
         else:
             self.nstates = nstates
-        log = logger.Logger(self.stdout, self.verbose)
+
+        self.check_sanity()
+        if self.verbose >= logger.INFO:
+            self.dump_flags()
+
+        log = logger.new_logger(self)
 
         def all_eigs(w, v, nroots, envs):
             return w, v, np.arange(w.size)
@@ -822,8 +845,6 @@ class NTTDA(TDBase):
             csidx, _, vsidx = _orbital_indices(self)
             ncs = len(csidx)
             nvs = len(vsidx)
-        else:
-            raise ValueError('deltaS should be -1, 0, or 1')
 
         x0sym = None
         if x0 is None:
