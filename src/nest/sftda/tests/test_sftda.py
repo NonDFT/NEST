@@ -128,9 +128,9 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(abs(e - td.e).max(), 0, delta=1e-6)
 
     def test_hf_tda_roks(self):
-        mf = self.mol.ROKS(xc='HF').run()
+        mf = self.mol.ROKS(xc='HF')
         ref = np.array([-0.2204522712, -0.0023966488])
-        td = sftda.TDA_SF(mf).set(extype=1, collinear_samples=50, nstates=2).run()
+        td = mf.SFTDA().set(extype=1, collinear_samples=50, nstates=2).run()
         self.assertTrue(np.all(td.converged))
         self.assertAlmostEqual(abs(td.e - ref).max(), 0, delta=1e-6)
         e = diagonalize_tda(mf, extype=1, collinear_samples=50, nstates=2)
@@ -189,6 +189,16 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(abs(td.e - ref).max(), 0, delta=1e-6)
         e = diagonalize_tda(mf, extype=1, collinear="col", collinear_samples=50, nstates=2)
         self.assertAlmostEqual(abs(e - td.e).max(), 0, delta=1e-6)
+
+    def test_tda_scanner(self):
+        mf = self.mol.UKS(xc='B3LYP').run()
+        for extype in (0, 1):
+            td = mf.SFTDA().set(extype=extype, nstates=3)
+            ref = td.kernel()[0].copy()
+            td_scan = td.as_scanner()
+            td_scan.max_cycle = 1
+            td_scan(self.mol)
+            self.assertAlmostEqual(abs(td_scan.e - ref).max(), 0, delta=1e-6)
 
 if __name__ == "__main__":
     print("Full Tests for spin-flip-TDA with UKS and ROKS references")

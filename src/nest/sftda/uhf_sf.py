@@ -17,7 +17,7 @@
 
 import numpy as np
 from pyscf import lib
-from pyscf import scf, dft
+from pyscf import scf, dft, gto
 from pyscf import ao2mo
 from pyscf.lib import logger
 from pyscf.tdscf import rhf
@@ -53,8 +53,9 @@ def get_ab_sf(
     List A has two items: (A_baba, A_abab).
     List B has two items: (B_baab, B_abba).
     '''
-    if isinstance(mf, scf.rohf.ROHF) or isinstance(mf, scf.hf_symm.SymAdaptedROHF):
-        if isinstance(mf, dft.roks.ROKS) or isinstance(mf, dft.rks_symm.SymAdaptedROKS):
+    ro_reference = isinstance(mf, scf.rohf.ROHF)
+    if ro_reference:
+        if isinstance(mf, scf.hf.KohnShamDFT):
             mf = mf.to_uks()
         else:
             mf = mf.to_uhf()
@@ -80,8 +81,7 @@ def get_ab_sf(
     nocc_b = orbo_b.shape[1]
     nvir_b = orbv_b.shape[1]
 
-    if np.allclose(mf.mo_coeff[0], mf.mo_coeff[1]):
-        logger.info(mf, 'Restricted open-shell detected.')
+    if ro_reference or np.allclose(mf.mo_coeff[0], mf.mo_coeff[1]):
         fock_ao_a, fock_ao_b = mf.get_fock()
         fock_oo_a = orbo_a.T @ fock_ao_a @ orbo_a
         fock_vv_a = orbv_a.T @ fock_ao_a @ orbv_a
@@ -275,13 +275,67 @@ def get_ab_sf(
 
     return a, b
 
+class TD_Scanner(rhf.TD_Scanner):
+    def __call__(self, mol_or_geom, **kwargs):
+        if isinstance(mol_or_geom, gto.MoleBase):
+            mol = mol_or_geom
+        else:
+            mol = self.mol.set_geom_(mol_or_geom, inplace=False)
+
+        basis_prev = np.hstack(self.mol.bas_exps())
+        mo_prev = self._scf.mo_coeff
+        occ_prev = self._scf.mo_occ
+        self.reset(mol)
+        mf_e = self._scf(mol)
+
+        x0 = kwargs.pop('x0', None)
+        if self.xy is not None:
+            if not np.array_equal(basis_prev, np.hstack(mol.bas_exps())):
+                self.xy = None
+            elif x0 is None:
+                x0 = self._transfer_initial_guess(self.xy, mo_prev, occ_prev)
+        self.kernel(x0=x0, **kwargs)
+        return mf_e + self.e
+
+
 @lib.with_doc(rhf.TDA.__doc__)
 class TDA_SF(TDBase):
     extype = 1
     collinear = 'mcol'
     collinear_samples = 20
+    _ro_reference = False
 
     _keys = {'extype', 'collinear', 'collinear_samples'}
+
+    def as_scanner(self):
+        if isinstance(self, lib.SinglePointScanner):
+            return self
+        name = self.__class__.__name__ + TD_Scanner.__name_mixin__
+        return lib.set_class(TD_Scanner(self), (TD_Scanner, self.__class__), name)
+
+    def _transfer_initial_guess(self, xy, mo_coeff, mo_occ):
+        # Project old amplitudes onto the new MO basis, as in GPU4PySCF.
+        mf = self._scf
+        overlap = mf.get_ovlp()
+        occupied = []
+        virtual = []
+        for spin in (0, 1):
+            old_occ = mo_coeff[spin][:, mo_occ[spin] > 0]
+            old_vir = mo_coeff[spin][:, mo_occ[spin] == 0]
+            new_occ = mf.mo_coeff[spin][:, mf.mo_occ[spin] > 0]
+            new_vir = mf.mo_coeff[spin][:, mf.mo_occ[spin] == 0]
+            occupied.append(new_occ.T @ overlap @ old_occ)
+            virtual.append(new_vir.T @ overlap @ old_vir)
+
+        source, target = (1, 0) if self.extype == 0 else (0, 1)
+        x = np.stack([x for x, y in xy])
+        x = np.einsum('ui,nij,vj->nuv', occupied[source], x, virtual[target])
+        x = x.reshape(len(xy), -1)
+        if np.isscalar(xy[0][1]):
+            return x
+        y = np.stack([y for x, y in xy])
+        y = np.einsum('ui,nij,vj->nuv', occupied[target], y, virtual[source])
+        return np.hstack((x, y.reshape(len(xy), -1)))
 
     def __init__(self, mf, extype=1, collinear="mcol", collinear_samples=20):
         TDBase.__init__(self,mf)
@@ -295,6 +349,7 @@ class TDA_SF(TDBase):
     def dump_flags(self, verbose=None):
         TDBase.dump_flags(self, verbose)
         log = logger.new_logger(self, verbose)
+        log.info('reference = %s', 'ROHF/ROKS' if self._ro_reference else 'UHF/UKS')
         log.info("extype = %s", self.extype)
         log.info("collinear = %s", self.collinear)
         if self.collinear == "mcol":
@@ -306,8 +361,10 @@ class TDA_SF(TDBase):
             raise ValueError("extype must be 0 or 1")
         if self.collinear not in ("col", "mcol"):
             raise ValueError("collinear must be 'col' or 'mcol'")
-        if self.collinear=='mcol' and self.collinear_samples <= 0:
-            raise ValueError("collinear_samples must be positive")
+        if self.collinear == 'mcol' and (
+            not isinstance(self.collinear_samples, (int, np.integer)) or self.collinear_samples <= 0
+        ):
+            raise ValueError("collinear_samples must be a positive integer")
         TDBase.check_sanity(self)
         return self
 
@@ -321,6 +378,8 @@ class TDA_SF(TDBase):
         assert (mo_coeff[0].dtype == np.double)
         mo_occ = mf.mo_occ
 
+        # Keep compatibility with references manually converted by to_uhf/to_uks.
+        ro_reference = self._ro_reference or np.allclose(mo_coeff[0], mo_coeff[1])
         extype = self.extype
         if extype==0:
             occidxb = mo_occ[1] > 0
@@ -328,7 +387,7 @@ class TDA_SF(TDBase):
             orbo = mo_coeff[1][:, occidxb]
             orbv = mo_coeff[0][:, viridxa]
             ndim = (int(occidxb.sum()), int(viridxa.sum()))
-            if np.allclose(mo_coeff[0], mo_coeff[1]):
+            if ro_reference:
                 fock_a, fock_b = mf.get_fock()
                 focko = orbo.conj().T @ fock_b @ orbo
                 fockv = orbv.conj().T @ fock_a @ orbv
@@ -342,7 +401,7 @@ class TDA_SF(TDBase):
             orbo = mo_coeff[0][:, occidxa]
             orbv = mo_coeff[1][:, viridxb]
             ndim = (int(occidxa.sum()), int(viridxb.sum()))
-            if np.allclose(mo_coeff[0], mo_coeff[1]):
+            if ro_reference:
                 fock_a, fock_b = mf.get_fock()
                 focko = orbo.conj().T @ fock_a @ orbo
                 fockv = orbv.conj().T @ fock_b @ orbv
@@ -364,7 +423,7 @@ class TDA_SF(TDBase):
             dms = lib.einsum('xov,pv,qo->xpq', zs, orbv, orbo.conj())
             v1ao = vresp(dms)
             v1mo = lib.einsum('xpq,qo,pv->xov', v1ao, orbo, orbv.conj())
-            if np.allclose(mo_coeff[0], mo_coeff[1]):
+            if ro_reference:
                 v1mo += lib.einsum('ab,xib->xia', fockv, zs)
                 v1mo -= lib.einsum('ji,xja->xia', focko, zs)
             else:
@@ -414,9 +473,6 @@ class TDA_SF(TDBase):
         '''
         cpu0 = (logger.process_clock(), logger.perf_counter())
 
-        self.check_sanity()
-        self.dump_flags()
-
         if extype is None:
             extype = self.extype
         else:
@@ -427,6 +483,10 @@ class TDA_SF(TDBase):
         else:
             self.nstates = nstates
 
+        if self.verbose >= logger.WARN:
+            self.check_sanity()
+        if self.verbose >= logger.INFO:
+            self.dump_flags()
         log = logger.Logger(self.stdout, self.verbose)
 
         def all_eigs(w, v, nroots, envs):
@@ -437,7 +497,10 @@ class TDA_SF(TDBase):
 
         x0sym = None
         if x0 is None:
-            x0 = self.init_guess()
+            if self.xy is None:
+                x0 = self.init_guess()
+            else:  # Reuse the previous amplitudes, including in geometry scans.
+                x0 = np.asarray([x.ravel() for x, y in self.xy])
 
         self.converged, self.e, x1 = eigh(
             vind, x0, precond, tol_residual=self.conv_tol, lindep=self.lindep,
@@ -516,7 +579,9 @@ class TDDFT_SF(TDA_SF):
         nvira = int(viridxa.sum())
         nvirb = int(viridxb.sum())
 
-        if np.allclose(mo_coeff[0], mo_coeff[1]):
+        # Keep compatibility with references manually converted by to_uhf/to_uks.
+        ro_reference = self._ro_reference or np.allclose(mo_coeff[0], mo_coeff[1])
+        if ro_reference:
             fock_a, fock_b = mf.get_fock()
             fockoa = orboa.conj().T @ fock_a @ orboa
             fockva = orbva.conj().T @ fock_a @ orbva
@@ -565,7 +630,7 @@ class TDDFT_SF(TDA_SF):
             if self.extype==0:
                 v1_top = lib.einsum('xpq,qo,pv->xov', v1ao, orbob, orbva.conj())
                 v1_bot = lib.einsum('xpq,po,qv->xov', v1ao, orboa.conj(), orbvb)
-                if np.allclose(mo_coeff[0], mo_coeff[1]):
+                if ro_reference:
                     v1_top += lib.einsum('ab,xib->xia', fockva, zs_b2a)
                     v1_top -= lib.einsum('ji,xja->xia', fockob, zs_b2a)
                     v1_bot += lib.einsum('ab,xib->xia', fockvb, zs_a2b)
@@ -576,7 +641,7 @@ class TDDFT_SF(TDA_SF):
             elif self.extype==1:
                 v1_top = lib.einsum('xpq,qo,pv->xov', v1ao, orboa, orbvb.conj())
                 v1_bot = lib.einsum('xpq,po,qv->xov', v1ao, orbob.conj(), orbva)
-                if np.allclose(mo_coeff[0], mo_coeff[1]):
+                if ro_reference:
                     v1_top += lib.einsum('ab,xib->xia', fockvb, zs_a2b)
                     v1_top -= lib.einsum('ji,xja->xia', fockoa, zs_a2b)
                     v1_bot += lib.einsum('ab,xib->xia', fockva, zs_b2a)
@@ -649,9 +714,6 @@ class TDDFT_SF(TDA_SF):
         '''
         cpu0 = (logger.process_clock(), logger.perf_counter())
 
-        self.check_sanity()
-        self.dump_flags()
-
         if extype is None:
             extype = self.extype
         else:
@@ -662,13 +724,20 @@ class TDDFT_SF(TDA_SF):
         else:
             self.nstates = nstates
 
+        if self.verbose >= logger.WARN:
+            self.check_sanity()
+        if self.verbose >= logger.INFO:
+            self.dump_flags()
         log = logger.Logger(self.stdout, self.verbose)
 
         vind, hdiag = self.gen_vind()
         precond = self.get_precond(hdiag)
 
         if x0 is None:
-            x0 = self.init_guess()
+            if self.xy is None:
+                x0 = self.init_guess()
+            else:
+                x0 = np.asarray([np.concatenate((x.ravel(), y.ravel())) for x, y in self.xy])
 
         pickeig = self.gen_pickeig(extype=extype)
 
@@ -961,12 +1030,3 @@ TDA_SF.spin_square = spin_square
 
 SFTDA = TDA_SF
 SFTDDFT = TDDFT_SF
-
-dft.uks.UKS.TDA_SF   = lib.class_as_method(TDA_SF)
-dft.uks.UKS.TDDFT_SF = lib.class_as_method(TDDFT_SF)
-scf.uhf.UHF.TDA_SF   = lib.class_as_method(TDA_SF)
-scf.uhf.UHF.TDDFT_SF = lib.class_as_method(TDDFT_SF)
-dft.uks.UKS.SFTDA = lib.class_as_method(TDA_SF)
-dft.uks.UKS.SFTDDFT = lib.class_as_method(TDDFT_SF)
-scf.uhf.UHF.SFTDA = lib.class_as_method(TDA_SF)
-scf.uhf.UHF.SFTDDFT = lib.class_as_method(TDDFT_SF)

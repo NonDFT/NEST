@@ -31,5 +31,7 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: python -m pip install -e ".[dev]"
+      - name: Check dispersion and optimization dependencies
+        run: python -c "from pyscf.dispersion import dftd3, dftd4; import geometric"
       - run: python -m ruff check .
       - run: python -m pytest src -q
