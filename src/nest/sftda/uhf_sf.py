@@ -53,8 +53,9 @@ def get_ab_sf(
     List A has two items: (A_baba, A_abab).
     List B has two items: (B_baab, B_abba).
     '''
-    if isinstance(mf, scf.rohf.ROHF) or isinstance(mf, scf.hf_symm.SymAdaptedROHF):
-        if isinstance(mf, dft.roks.ROKS) or isinstance(mf, dft.rks_symm.SymAdaptedROKS):
+    ro_reference = isinstance(mf, scf.rohf.ROHF)
+    if ro_reference:
+        if isinstance(mf, scf.hf.KohnShamDFT):
             mf = mf.to_uks()
         else:
             mf = mf.to_uhf()
@@ -80,8 +81,7 @@ def get_ab_sf(
     nocc_b = orbo_b.shape[1]
     nvir_b = orbv_b.shape[1]
 
-    if np.allclose(mf.mo_coeff[0], mf.mo_coeff[1]):
-        logger.info(mf, 'Restricted open-shell detected.')
+    if ro_reference or np.allclose(mf.mo_coeff[0], mf.mo_coeff[1]):
         fock_ao_a, fock_ao_b = mf.get_fock()
         fock_oo_a = orbo_a.T @ fock_ao_a @ orbo_a
         fock_vv_a = orbv_a.T @ fock_ao_a @ orbv_a
@@ -303,6 +303,7 @@ class TDA_SF(TDBase):
     extype = 1
     collinear = 'mcol'
     collinear_samples = 20
+    _ro_reference = False
 
     _keys = {'extype', 'collinear', 'collinear_samples'}
 
@@ -348,6 +349,7 @@ class TDA_SF(TDBase):
     def dump_flags(self, verbose=None):
         TDBase.dump_flags(self, verbose)
         log = logger.new_logger(self, verbose)
+        log.info('reference = %s', 'ROHF/ROKS' if self._ro_reference else 'UHF/UKS')
         log.info("extype = %s", self.extype)
         log.info("collinear = %s", self.collinear)
         if self.collinear == "mcol":
@@ -376,6 +378,8 @@ class TDA_SF(TDBase):
         assert (mo_coeff[0].dtype == np.double)
         mo_occ = mf.mo_occ
 
+        # Keep compatibility with references manually converted by to_uhf/to_uks.
+        ro_reference = self._ro_reference or np.allclose(mo_coeff[0], mo_coeff[1])
         extype = self.extype
         if extype==0:
             occidxb = mo_occ[1] > 0
@@ -383,7 +387,7 @@ class TDA_SF(TDBase):
             orbo = mo_coeff[1][:, occidxb]
             orbv = mo_coeff[0][:, viridxa]
             ndim = (int(occidxb.sum()), int(viridxa.sum()))
-            if np.allclose(mo_coeff[0], mo_coeff[1]):
+            if ro_reference:
                 fock_a, fock_b = mf.get_fock()
                 focko = orbo.conj().T @ fock_b @ orbo
                 fockv = orbv.conj().T @ fock_a @ orbv
@@ -397,7 +401,7 @@ class TDA_SF(TDBase):
             orbo = mo_coeff[0][:, occidxa]
             orbv = mo_coeff[1][:, viridxb]
             ndim = (int(occidxa.sum()), int(viridxb.sum()))
-            if np.allclose(mo_coeff[0], mo_coeff[1]):
+            if ro_reference:
                 fock_a, fock_b = mf.get_fock()
                 focko = orbo.conj().T @ fock_a @ orbo
                 fockv = orbv.conj().T @ fock_b @ orbv
@@ -419,7 +423,7 @@ class TDA_SF(TDBase):
             dms = lib.einsum('xov,pv,qo->xpq', zs, orbv, orbo.conj())
             v1ao = vresp(dms)
             v1mo = lib.einsum('xpq,qo,pv->xov', v1ao, orbo, orbv.conj())
-            if np.allclose(mo_coeff[0], mo_coeff[1]):
+            if ro_reference:
                 v1mo += lib.einsum('ab,xib->xia', fockv, zs)
                 v1mo -= lib.einsum('ji,xja->xia', focko, zs)
             else:
@@ -575,7 +579,9 @@ class TDDFT_SF(TDA_SF):
         nvira = int(viridxa.sum())
         nvirb = int(viridxb.sum())
 
-        if np.allclose(mo_coeff[0], mo_coeff[1]):
+        # Keep compatibility with references manually converted by to_uhf/to_uks.
+        ro_reference = self._ro_reference or np.allclose(mo_coeff[0], mo_coeff[1])
+        if ro_reference:
             fock_a, fock_b = mf.get_fock()
             fockoa = orboa.conj().T @ fock_a @ orboa
             fockva = orbva.conj().T @ fock_a @ orbva
@@ -624,7 +630,7 @@ class TDDFT_SF(TDA_SF):
             if self.extype==0:
                 v1_top = lib.einsum('xpq,qo,pv->xov', v1ao, orbob, orbva.conj())
                 v1_bot = lib.einsum('xpq,po,qv->xov', v1ao, orboa.conj(), orbvb)
-                if np.allclose(mo_coeff[0], mo_coeff[1]):
+                if ro_reference:
                     v1_top += lib.einsum('ab,xib->xia', fockva, zs_b2a)
                     v1_top -= lib.einsum('ji,xja->xia', fockob, zs_b2a)
                     v1_bot += lib.einsum('ab,xib->xia', fockvb, zs_a2b)
@@ -635,7 +641,7 @@ class TDDFT_SF(TDA_SF):
             elif self.extype==1:
                 v1_top = lib.einsum('xpq,qo,pv->xov', v1ao, orboa, orbvb.conj())
                 v1_bot = lib.einsum('xpq,po,qv->xov', v1ao, orbob.conj(), orbva)
-                if np.allclose(mo_coeff[0], mo_coeff[1]):
+                if ro_reference:
                     v1_top += lib.einsum('ab,xib->xia', fockvb, zs_a2b)
                     v1_top -= lib.einsum('ji,xja->xia', fockoa, zs_a2b)
                     v1_bot += lib.einsum('ab,xib->xia', fockva, zs_b2a)
@@ -1024,12 +1030,3 @@ TDA_SF.spin_square = spin_square
 
 SFTDA = TDA_SF
 SFTDDFT = TDDFT_SF
-
-dft.uks.UKS.TDA_SF   = lib.class_as_method(TDA_SF)
-dft.uks.UKS.TDDFT_SF = lib.class_as_method(TDDFT_SF)
-scf.uhf.UHF.TDA_SF   = lib.class_as_method(TDA_SF)
-scf.uhf.UHF.TDDFT_SF = lib.class_as_method(TDDFT_SF)
-dft.uks.UKS.SFTDA = lib.class_as_method(TDA_SF)
-dft.uks.UKS.SFTDDFT = lib.class_as_method(TDDFT_SF)
-scf.uhf.UHF.SFTDA = lib.class_as_method(TDA_SF)
-scf.uhf.UHF.SFTDDFT = lib.class_as_method(TDDFT_SF)

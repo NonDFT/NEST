@@ -128,9 +128,9 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(abs(e - td.e).max(), 0, delta=1e-6)
 
     def test_hf_tda_roks(self):
-        mf = self.mol.ROKS(xc='HF').run()
+        mf = self.mol.ROKS(xc='HF')
         ref = np.array([-0.2204522712, -0.0023966488])
-        td = sftda.TDA_SF(mf).set(extype=1, collinear_samples=50, nstates=2).run()
+        td = mf.SFTDA().set(extype=1, collinear_samples=50, nstates=2).run()
         self.assertTrue(np.all(td.converged))
         self.assertAlmostEqual(abs(td.e - ref).max(), 0, delta=1e-6)
         e = diagonalize_tda(mf, extype=1, collinear_samples=50, nstates=2)
