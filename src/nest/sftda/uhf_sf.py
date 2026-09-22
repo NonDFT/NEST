@@ -17,7 +17,7 @@
 
 import numpy as np
 from pyscf import lib
-from pyscf import scf, dft
+from pyscf import scf, dft, gto
 from pyscf import ao2mo
 from pyscf.lib import logger
 from pyscf.tdscf import rhf
@@ -275,6 +275,29 @@ def get_ab_sf(
 
     return a, b
 
+class TD_Scanner(rhf.TD_Scanner):
+    def __call__(self, mol_or_geom, **kwargs):
+        if isinstance(mol_or_geom, gto.MoleBase):
+            mol = mol_or_geom
+        else:
+            mol = self.mol.set_geom_(mol_or_geom, inplace=False)
+
+        basis_prev = np.hstack(self.mol.bas_exps())
+        mo_prev = self._scf.mo_coeff
+        occ_prev = self._scf.mo_occ
+        self.reset(mol)
+        mf_e = self._scf(mol)
+
+        x0 = kwargs.pop('x0', None)
+        if self.xy is not None:
+            if not np.array_equal(basis_prev, np.hstack(mol.bas_exps())):
+                self.xy = None
+            elif x0 is None:
+                x0 = self._transfer_initial_guess(self.xy, mo_prev, occ_prev)
+        self.kernel(x0=x0, **kwargs)
+        return mf_e + self.e
+
+
 @lib.with_doc(rhf.TDA.__doc__)
 class TDA_SF(TDBase):
     extype = 1
@@ -282,6 +305,36 @@ class TDA_SF(TDBase):
     collinear_samples = 20
 
     _keys = {'extype', 'collinear', 'collinear_samples'}
+
+    def as_scanner(self):
+        if isinstance(self, lib.SinglePointScanner):
+            return self
+        name = self.__class__.__name__ + TD_Scanner.__name_mixin__
+        return lib.set_class(TD_Scanner(self), (TD_Scanner, self.__class__), name)
+
+    def _transfer_initial_guess(self, xy, mo_coeff, mo_occ):
+        # Project old amplitudes onto the new MO basis, as in GPU4PySCF.
+        mf = self._scf
+        overlap = mf.get_ovlp()
+        occupied = []
+        virtual = []
+        for spin in (0, 1):
+            old_occ = mo_coeff[spin][:, mo_occ[spin] > 0]
+            old_vir = mo_coeff[spin][:, mo_occ[spin] == 0]
+            new_occ = mf.mo_coeff[spin][:, mf.mo_occ[spin] > 0]
+            new_vir = mf.mo_coeff[spin][:, mf.mo_occ[spin] == 0]
+            occupied.append(new_occ.T @ overlap @ old_occ)
+            virtual.append(new_vir.T @ overlap @ old_vir)
+
+        source, target = (1, 0) if self.extype == 0 else (0, 1)
+        x = np.stack([x for x, y in xy])
+        x = np.einsum('ui,nij,vj->nuv', occupied[source], x, virtual[target])
+        x = x.reshape(len(xy), -1)
+        if np.isscalar(xy[0][1]):
+            return x
+        y = np.stack([y for x, y in xy])
+        y = np.einsum('ui,nij,vj->nuv', occupied[target], y, virtual[source])
+        return np.hstack((x, y.reshape(len(xy), -1)))
 
     def __init__(self, mf, extype=1, collinear="mcol", collinear_samples=20):
         TDBase.__init__(self,mf)
@@ -306,8 +359,10 @@ class TDA_SF(TDBase):
             raise ValueError("extype must be 0 or 1")
         if self.collinear not in ("col", "mcol"):
             raise ValueError("collinear must be 'col' or 'mcol'")
-        if self.collinear=='mcol' and self.collinear_samples <= 0:
-            raise ValueError("collinear_samples must be positive")
+        if self.collinear == 'mcol' and (
+            not isinstance(self.collinear_samples, (int, np.integer)) or self.collinear_samples <= 0
+        ):
+            raise ValueError("collinear_samples must be a positive integer")
         TDBase.check_sanity(self)
         return self
 
@@ -414,9 +469,6 @@ class TDA_SF(TDBase):
         '''
         cpu0 = (logger.process_clock(), logger.perf_counter())
 
-        self.check_sanity()
-        self.dump_flags()
-
         if extype is None:
             extype = self.extype
         else:
@@ -427,6 +479,10 @@ class TDA_SF(TDBase):
         else:
             self.nstates = nstates
 
+        if self.verbose >= logger.WARN:
+            self.check_sanity()
+        if self.verbose >= logger.INFO:
+            self.dump_flags()
         log = logger.Logger(self.stdout, self.verbose)
 
         def all_eigs(w, v, nroots, envs):
@@ -437,7 +493,10 @@ class TDA_SF(TDBase):
 
         x0sym = None
         if x0 is None:
-            x0 = self.init_guess()
+            if self.xy is None:
+                x0 = self.init_guess()
+            else:  # Reuse the previous amplitudes, including in geometry scans.
+                x0 = np.asarray([x.ravel() for x, y in self.xy])
 
         self.converged, self.e, x1 = eigh(
             vind, x0, precond, tol_residual=self.conv_tol, lindep=self.lindep,
@@ -649,9 +708,6 @@ class TDDFT_SF(TDA_SF):
         '''
         cpu0 = (logger.process_clock(), logger.perf_counter())
 
-        self.check_sanity()
-        self.dump_flags()
-
         if extype is None:
             extype = self.extype
         else:
@@ -662,13 +718,20 @@ class TDDFT_SF(TDA_SF):
         else:
             self.nstates = nstates
 
+        if self.verbose >= logger.WARN:
+            self.check_sanity()
+        if self.verbose >= logger.INFO:
+            self.dump_flags()
         log = logger.Logger(self.stdout, self.verbose)
 
         vind, hdiag = self.gen_vind()
         precond = self.get_precond(hdiag)
 
         if x0 is None:
-            x0 = self.init_guess()
+            if self.xy is None:
+                x0 = self.init_guess()
+            else:
+                x0 = np.asarray([np.concatenate((x.ravel(), y.ravel())) for x, y in self.xy])
 
         pickeig = self.gen_pickeig(extype=extype)
 
