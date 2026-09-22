@@ -18,10 +18,11 @@ from .common import (
     orbital_spaces,
     pair_density,
     FockProjection,
-    _fock_response_q,
+    fock_probes,
+    fock_projection_q,
+    response_projection_q,
     ResponseTerm,
     _apply_reference_responses,
-    _apply_hfx_responses,
 )
 
 
@@ -84,6 +85,16 @@ def split_same_spin(tdobj, xy):
         ov=vector[slices["OV"]].reshape(no, nv),
         cv0=vector[slices["CV0"]].reshape(nc, nv),
     )
+
+
+def same_spin_block_data(spaces, amplitudes):
+    """MO index/factor map for variations of same-spin transition densities."""
+    return {
+        "CO": (spaces.open, spaces.closed, amplitudes.co.T),
+        "CV": (spaces.virtual, spaces.closed, amplitudes.cv.T),
+        "OV": (spaces.virtual, spaces.open, amplitudes.ov.T),
+        "CV0": (spaces.virtual, spaces.closed, amplitudes.cv0.T),
+    }
 
 
 def same_spin_transition_densities(tdobj, xy):
@@ -182,64 +193,8 @@ def same_spin_fock_projections(tdobj, xy):
 
 
 def same_spin_fock_probes(tdobj, xy):
-    """Return AO probes ``(P0, Pz)`` generated from the Fock ledger."""
-    nao = tdobj.mol.nao_nr()
-    p0 = np.zeros((nao, nao))
-    pz = np.zeros_like(p0)
-    for term in same_spin_fock_projections(tdobj, xy):
-        density = term.density()
-        p0 += term.weight_f0 * density
-        pz += term.weight_fz * density
-    return p0, pz
-
-
-def same_spin_fock_q(tdobj, xy, max_memory=None):
-    """Return the explicit-Fock contribution to ``(Q_alpha,Q_beta)``.
-
-    For HF the complete ``Fz`` response is exactly represented by the
-    spin-resolved probes.  DFT callers add the independent ``Fz`` and
-    ``nobeta`` response ledgers after this common ``F0`` contribution.
-    """
-    mf = tdobj._scf
-    mo = np.asarray(mf.mo_coeff)
-    nmo = mo.shape[1]
-    fock0, fockz = fock0_fockz(tdobj, max_memory=max_memory)
-    fock0_mo = mo.conj().T @ fock0 @ mo
-    fockz_mo = mo.conj().T @ fockz @ mo
-    q_alpha = np.zeros((nmo, nmo))
-    q_beta = np.zeros_like(q_alpha)
-
-    for term in same_spin_fock_projections(tdobj, xy):
-        left = term.left_indices
-        right = term.right_indices
-        coeff = term.coefficient
-
-        def project(target, operator, scale):
-            if scale == 0.0:
-                return
-            target[:, left] += scale * operator[:, right] @ coeff.T
-            target[:, right] += scale * operator[:, left] @ coeff
-
-        project(q_alpha, fock0_mo, 0.5 * term.weight_f0)
-        project(q_beta, fock0_mo, 0.5 * term.weight_f0)
-        if mf._numint._xc_type(mf.xc) == "HF":
-            project(q_alpha, fockz_mo, 0.5 * term.weight_fz)
-            project(q_beta, fockz_mo, 0.5 * term.weight_fz)
-        else:
-            project(q_alpha, fockz_mo, term.weight_fz)
-
-    p0, pz = same_spin_fock_probes(tdobj, xy)
-    p_alpha = 0.5 * p0
-    p_beta = 0.5 * p0
-    if mf._numint._xc_type(mf.xc) == "HF":
-        p_alpha = p_alpha + 0.5 * pz
-        p_beta = p_beta - 0.5 * pz
-    response_alpha, response_beta = _fock_response_q(
-        tdobj, p_alpha, p_beta,
-    )
-    q_alpha += response_alpha
-    q_beta += response_beta
-    return q_alpha, q_beta
+    """AO probes of the channel's explicit Fock scalar."""
+    return fock_probes(tdobj, same_spin_fock_projections(tdobj, xy))
 
 
 def same_spin_fock_scalar(tdobj, xy, max_memory=None):
@@ -283,18 +238,6 @@ def same_spin_response_terms(spin):
     )
 
 
-def _derivative_potentials(spaces, densities, vref0, vref1):
-    potentials = {label: np.zeros_like(dm) for label, dm in densities.items()}
-    for term in same_spin_response_terms(spaces.spin):
-        if term.vref0:
-            potentials[term.target] += term.vref0 * vref0[term.source]
-            potentials[term.source] += term.vref0 * vref0[term.target]
-        if term.vref1:
-            potentials[term.target] += term.vref1 * vref1[term.source]
-            potentials[term.source] += term.vref1 * vref1[term.target]
-    return potentials
-
-
 def same_spin_response_scalar(tdobj, xy, max_memory=None):
     """Evaluate all current-NTTDA response terms in ``X.T A_sc X``."""
     spaces, _amp, densities = same_spin_transition_densities(tdobj, xy)
@@ -313,60 +256,6 @@ def same_spin_response_scalar(tdobj, xy, max_memory=None):
                 "pq,pq->", target, vref1[term.source],
             )
     return float(value)
-
-
-def same_spin_response_derivative_potentials(tdobj, xy, max_memory=None):
-    """AO potentials obtained by varying both sides of the response scalar."""
-    spaces, _amp, densities = same_spin_transition_densities(tdobj, xy)
-    vref0, vref1 = _apply_reference_responses(
-        tdobj, densities, max_memory=max_memory,
-    )
-    return _derivative_potentials(spaces, densities, vref0, vref1)
-
-
-def same_spin_response_projection_q(tdobj, xy, max_memory=None):
-    """MO derivative from transition-density factors at frozen kernels."""
-    spaces, amp, _densities = same_spin_transition_densities(tdobj, xy)
-    potentials = same_spin_response_derivative_potentials(
-        tdobj, xy, max_memory=max_memory,
-    )
-    mo = np.asarray(tdobj._scf.mo_coeff)
-    q_alpha = np.zeros((mo.shape[1], mo.shape[1]))
-    q_beta = np.zeros_like(q_alpha)
-    block_data = {
-        "CO": (spaces.open, spaces.closed, amp.co.T),
-        "CV": (spaces.virtual, spaces.closed, amp.cv.T),
-        "OV": (spaces.virtual, spaces.open, amp.ov.T),
-        "CV0": (spaces.virtual, spaces.closed, amp.cv0.T),
-    }
-    for label, (target, source, coefficient) in block_data.items():
-        potential_mo = mo.conj().T @ potentials[label] @ mo
-        q_beta[:, target] += potential_mo[:, source] @ coefficient.T
-        q_alpha[:, source] += potential_mo[target, :].T @ coefficient
-    return q_alpha, q_beta
-
-
-def same_spin_hfx_projection_q(tdobj, xy):
-    """Transition-factor derivative of only the hybrid/RSH response scalar."""
-    spaces, amp, densities = same_spin_transition_densities(tdobj, xy)
-    vref0, vref1 = _apply_hfx_responses(tdobj, densities)
-    potentials = _derivative_potentials(
-        spaces, densities, vref0, vref1,
-    )
-    mo = np.asarray(tdobj._scf.mo_coeff)
-    q_alpha = np.zeros((mo.shape[1], mo.shape[1]))
-    q_beta = np.zeros_like(q_alpha)
-    block_data = {
-        "CO": (spaces.open, spaces.closed, amp.co.T),
-        "CV": (spaces.virtual, spaces.closed, amp.cv.T),
-        "OV": (spaces.virtual, spaces.open, amp.ov.T),
-        "CV0": (spaces.virtual, spaces.closed, amp.cv0.T),
-    }
-    for label, (target, source, coefficient) in block_data.items():
-        potential_mo = mo.conj().T @ potentials[label] @ mo
-        q_beta[:, target] += potential_mo[:, source] @ coefficient.T
-        q_alpha[:, source] += potential_mo[target, :].T @ coefficient
-    return q_alpha, q_beta
 
 
 # Scalar closure diagnostics (private to this channel)
@@ -398,18 +287,14 @@ def grad_elec(
     if tdobj.deltaS != 0:
         raise ValueError("deltaS=0 gradient received a different spin channel")
     spaces, amplitudes, densities = same_spin_transition_densities(tdobj, xy)
-    blocks = {
-        "CO": (spaces.open, spaces.closed, amplitudes.co.T),
-        "CV": (spaces.virtual, spaces.closed, amplitudes.cv.T),
-        "OV": (spaces.virtual, spaces.open, amplitudes.ov.T),
-        "CV0": (spaces.virtual, spaces.closed, amplitudes.cv0.T),
-    }
+    blocks = same_spin_block_data(spaces, amplitudes)
     response_terms = same_spin_response_terms(spaces.spin)
     channel_data = (spaces, amplitudes, densities, blocks, response_terms)
-    p0, pz = same_spin_fock_probes(tdobj, xy)
+    projections = same_spin_fock_projections(tdobj, xy)
+    probes = fock_probes(tdobj, projections)
     return assemble_gradient(
-        gradient_driver, tdobj, channel_data, (p0, pz),
-        same_spin_fock_q(tdobj, xy),
-        same_spin_hfx_projection_q(tdobj, xy),
+        gradient_driver, tdobj, channel_data, probes,
+        fock_projection_q(tdobj, projections, fock0_fockz(tdobj), probes),
+        response_projection_q(tdobj, channel_data, hfx_only=True),
         atmlst=atmlst, tolerance=tolerance, max_cycle=max_cycle,
     )

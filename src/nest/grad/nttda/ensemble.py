@@ -2,10 +2,9 @@
 
 import numpy as np
 
-from pyscf import lib
 from pyscf.scf import hf
 
-from .roks import GradientComponents, _orbital_gradient, pack_m_matrix
+from .roks import finish_gradient, pack_m_matrix, _solve_zvector
 
 
 def canonical_pairs(tdobj):
@@ -114,78 +113,10 @@ def _preconditioner(tdobj, pairs):
     return diagonal
 
 
-def solve_zvector(action, pairs, tdobj, rhs, tolerance=1e-12,
-                  max_cycle=None):
-    """Solve the average-occupation orbital adjoint equation."""
-    diagonal = _preconditioner(tdobj, pairs)
-    initial = rhs / diagonal
-    if max_cycle is None:
-        max_cycle = len(rhs)
-
-    def operator(vector):
-        vector = np.asarray(vector)
-        if vector.ndim == 1:
-            return action(vector) / diagonal - vector
-        return np.asarray([action(row) / diagonal - row for row in vector])
-
-    solution = lib.krylov(
-        operator,
-        initial,
-        tol=tolerance,
-        max_cycle=max_cycle,
-        lindep=1e-22,
-        hermi=False,
-        verbose=0,
-    )
-    return np.asarray(solution).reshape(-1)
-
-
-def finish_gradient(
-        gradient_driver, tdobj, m_matrix, direct, atmlst,
-        tolerance, max_cycle, fock_direct, direct_fock_probes=None):
-    """Solve the Dz0SCF average-occupation adjoint and assemble ``d omega / dR``."""
-    transpose_action, pairs = make_hessian_transpose_action(tdobj)
-    rhs = pack_m_matrix(m_matrix, pairs)
-    zvector = solve_zvector(
-        transpose_action,
-        pairs,
-        tdobj,
-        rhs,
-        tolerance=tolerance,
-        max_cycle=max_cycle,
-    )
-    adjoint = zvector_adjoint_matrix(tdobj, pairs, zvector)
-    residual = float(np.max(np.abs(pack_m_matrix(adjoint, pairs) - rhs)))
-    probe_alpha, probe_beta = zvector_probe_densities(
-        tdobj, pairs, zvector,
-    )
-    if direct_fock_probes is None:
-        fock_contraction = fock_direct(
-            gradient_driver, tdobj, probe_alpha, probe_beta, atmlst=atmlst,
-        )
-        direct_total = direct
-    else:
-        direct_alpha, direct_beta = direct_fock_probes
-        fock_contractions = fock_direct(
-            gradient_driver,
-            tdobj,
-            np.asarray((direct_alpha, probe_alpha)),
-            np.asarray((direct_beta, probe_beta)),
-            atmlst=atmlst,
-        )
-        direct_total = direct + fock_contractions[0]
-        fock_contraction = fock_contractions[1]
-    orbital = _orbital_gradient(
-        tdobj, m_matrix, adjoint, fock_contraction, atmlst=atmlst,
-    )
-    return GradientComponents(
-        m_matrix=m_matrix,
-        direct=direct_total,
-        orbital=orbital,
-        total=direct_total + orbital,
-        zvector=zvector,
-        residual=residual,
-    )
+def solve_zvector(action, pairs, tdobj, rhs, tolerance=1e-12, max_cycle=None):
+    """Solve the average-occupation adjoint with its occupation-weighted diagonal."""
+    return _solve_zvector(action, _preconditioner(tdobj, pairs), rhs,
+                          tolerance, max_cycle)
 
 
 __all__ = [

@@ -30,21 +30,12 @@ def finish_gradient(
     contraction is the first result and the Z-vector contraction is the second.
     """
     if getattr(tdobj._scf, "is_average_occupation_reference", False):
-        from .ensemble import finish_gradient as finish_ensemble_gradient
-        return finish_ensemble_gradient(
-            gradient_driver,
-            tdobj,
-            m_matrix,
-            direct,
-            atmlst,
-            tolerance,
-            max_cycle,
-            fock_direct,
-            direct_fock_probes=direct_fock_probes,
-        )
-    transpose_action, pairs = make_hessian_transpose_action(tdobj)
+        from . import ensemble as response
+    else:
+        from . import roks as response
+    transpose_action, pairs = response.make_hessian_transpose_action(tdobj)
     rhs = pack_m_matrix(m_matrix, pairs)
-    zvector = solve_zvector(
+    zvector = response.solve_zvector(
         transpose_action,
         pairs,
         tdobj,
@@ -52,9 +43,9 @@ def finish_gradient(
         tolerance=tolerance,
         max_cycle=max_cycle,
     )
-    adjoint = zvector_adjoint_matrix(tdobj, pairs, zvector)
+    adjoint = response.zvector_adjoint_matrix(tdobj, pairs, zvector)
     residual = float(np.max(np.abs(pack_m_matrix(adjoint, pairs) - rhs)))
-    probe_alpha, probe_beta = zvector_probe_densities(
+    probe_alpha, probe_beta = response.zvector_probe_densities(
         tdobj, pairs, zvector,
     )
     if direct_fock_probes is None:
@@ -128,39 +119,18 @@ def _response_reference(mf):
     return mf
 
 
-def make_hessian_transpose_action(tdobj, pairs=None):
-    """Return a matrix-free action for the transpose ROKS Hessian."""
+def _make_adjoint_action(tdobj, pairs):
+    """Cache reference operators for the full ROKS adjoint matrix."""
     mf = tdobj._scf
     mo = np.asarray(mf.mo_coeff)
     occ = np.asarray(mf.mo_occ)
-    nmo = mo.shape[1]
-    if pairs is None:
-        pairs = canonical_pairs(tdobj, compact=True)
     fock_alpha, fock_beta = _spin_focks_mo(mf)
     occupation_alpha = (occ > 0).astype(float)
     occupation_beta = (occ == 2).astype(float)
     response = _response_reference(mf).gen_response(hermi=1)
 
-    def unpack(vector):
-        source_alpha = np.zeros((nmo, nmo))
-        source_beta = np.zeros_like(source_alpha)
-        for value, (p, q, name) in zip(vector, pairs):
-            if name in ("cc", "oo", "vv"):
-                source_alpha[p, q] += 0.5 * value
-                source_beta[p, q] += 0.5 * value
-            elif name == "co":
-                source_beta[p, q] += value
-            elif name == "cv":
-                source_alpha[p, q] += value
-                source_beta[p, q] += value
-            elif name == "ov":
-                source_alpha[p, q] += value
-            else:
-                raise ValueError("unknown ROKS pair type %s" % name)
-        return source_alpha, source_beta
-
     def apply_one(vector):
-        source_alpha, source_beta = unpack(vector)
+        source_alpha, source_beta = _unpack_zvector_source(tdobj, pairs, vector)
         gradient = fock_alpha @ (source_alpha + source_alpha.T)
         gradient += fock_beta @ (source_beta + source_beta.T)
         density_alpha = mo @ source_alpha @ mo.conj().T
@@ -176,16 +146,22 @@ def make_hessian_transpose_action(tdobj, pairs=None):
         gradient += potential_alpha.T * occupation_alpha[None, :]
         gradient += potential_beta * occupation_beta[None, :]
         gradient += potential_beta.T * occupation_beta[None, :]
-        return np.asarray([
-            gradient[p, q] - gradient[q, p]
-            for p, q, _name in pairs
-        ])
+        return gradient
+
+    return apply_one
+
+
+def make_hessian_transpose_action(tdobj, pairs=None):
+    """Return a matrix-free action for the transpose ROKS Hessian."""
+    if pairs is None:
+        pairs = canonical_pairs(tdobj, compact=True)
+    adjoint = _make_adjoint_action(tdobj, pairs)
 
     def apply(vector):
         vector = np.asarray(vector)
         if vector.ndim == 1:
-            return apply_one(vector)
-        return np.asarray([apply_one(row) for row in vector])
+            return pack_m_matrix(adjoint(vector), pairs)
+        return np.asarray([pack_m_matrix(adjoint(row), pairs) for row in vector])
 
     return apply, pairs
 
@@ -222,9 +198,8 @@ def _preconditioner(tdobj, pairs):
     return diagonal
 
 
-def solve_zvector(action, pairs, tdobj, rhs, tolerance=1e-12, max_cycle=None):
-    """Solve ``H.T z = rhs`` using the PySCF CPHF Krylov pattern."""
-    diagonal = _preconditioner(tdobj, pairs)
+def _solve_zvector(action, diagonal, rhs, tolerance=1e-12, max_cycle=None):
+    """Shared preconditioned Krylov solve, with a reference-specific diagonal."""
     initial = rhs / diagonal
     if max_cycle is None:
         max_cycle = len(rhs)
@@ -245,6 +220,11 @@ def solve_zvector(action, pairs, tdobj, rhs, tolerance=1e-12, max_cycle=None):
         verbose=0,
     )
     return np.asarray(solution).reshape(-1)
+
+def solve_zvector(action, pairs, tdobj, rhs, tolerance=1e-12, max_cycle=None):
+    """Solve the ROKS adjoint with its spin-resolved preconditioner."""
+    return _solve_zvector(action, _preconditioner(tdobj, pairs), rhs,
+                          tolerance, max_cycle)
 
 
 def _unpack_zvector_source(tdobj, pairs, zvector):
@@ -269,31 +249,7 @@ def _unpack_zvector_source(tdobj, pairs, zvector):
 
 def zvector_adjoint_matrix(tdobj, pairs, zvector):
     """Full MO adjoint matrix satisfying ``z.H(kappa)=Tr(G.T kappa)``."""
-    mf = tdobj._scf
-    mo = np.asarray(mf.mo_coeff)
-    occ = np.asarray(mf.mo_occ)
-    fock_alpha, fock_beta = _spin_focks_mo(mf)
-    occupation_alpha = (occ > 0).astype(float)
-    occupation_beta = (occ == 2).astype(float)
-    source_alpha, source_beta = _unpack_zvector_source(
-        tdobj, pairs, zvector,
-    )
-    gradient = fock_alpha @ (source_alpha + source_alpha.T)
-    gradient += fock_beta @ (source_beta + source_beta.T)
-    density_alpha = mo @ source_alpha @ mo.conj().T
-    density_beta = mo @ source_beta @ mo.conj().T
-    density_alpha = 0.5 * (density_alpha + density_alpha.T)
-    density_beta = 0.5 * (density_beta + density_beta.T)
-    potential_alpha, potential_beta = _response_reference(mf).gen_response(
-        hermi=1,
-    )(np.asarray((density_alpha, density_beta)))
-    potential_alpha = mo.conj().T @ potential_alpha @ mo
-    potential_beta = mo.conj().T @ potential_beta @ mo
-    gradient += potential_alpha * occupation_alpha[None, :]
-    gradient += potential_alpha.T * occupation_alpha[None, :]
-    gradient += potential_beta * occupation_beta[None, :]
-    gradient += potential_beta.T * occupation_beta[None, :]
-    return gradient
+    return _make_adjoint_action(tdobj, pairs)(zvector)
 
 
 def zvector_probe_densities(tdobj, pairs, zvector):

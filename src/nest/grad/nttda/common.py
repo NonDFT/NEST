@@ -11,6 +11,7 @@ from pyscf.grad import rhf as rhf_grad
 from nest.nttda import nttda as nttda_mod
 
 from . import xc as xc_backend
+from .xc import _reference_spin_densities
 from .roks import finish_gradient
 
 
@@ -45,22 +46,12 @@ def assemble_gradient(
         else (0.5 * p0, 0.5 * p0)
     )
     if xctype != "HF":
-        if xctype == "LDA":
-            response_builder = xc_backend.lda_response_terms
-            fockz_builder = xc_backend.lda_fockz_terms
-            nobeta_builder = xc_backend.lda_nobeta_reference_q
-        elif xctype in ("GGA", "MGGA"):
-            response_builder = xc_backend.semilocal_response_terms
-            fockz_builder = xc_backend.semilocal_fockz_terms
-            nobeta_builder = xc_backend.semilocal_nobeta_reference_q
-        else:
-            raise NotImplementedError("NTTDA gradient does not support XC type %s" % xctype)
         for terms in (
-                response_builder(gradient_driver, tdobj, channel_data, atmlst=atmlst),
-                fockz_builder(gradient_driver, tdobj, spaces, pz, atmlst=atmlst)):
+                xc_backend.response_terms(gradient_driver, tdobj, channel_data, atmlst=atmlst),
+                xc_backend.fockz_terms(gradient_driver, tdobj, spaces, pz, atmlst=atmlst)):
             m_matrix += terms.q_alpha + terms.q_beta
             direct += terms.direct
-        common_alpha, common_beta = nobeta_builder(tdobj, p0)
+        common_alpha, common_beta = xc_backend.nobeta_reference_q(tdobj, p0)
         m_matrix += common_alpha + common_beta
     if not spin_fock:
         terms = fockz_hfx_terms(
@@ -71,16 +62,10 @@ def assemble_gradient(
         direct += terms.direct
 
     def fock_direct(driver, obj, p_alpha, p_beta, atmlst=None):
-        if xctype == "HF":
-            local = spin_fock_direct_hf(
-                driver, obj, p_alpha, p_beta, atmlst=atmlst,
-                jk_ledger=ledger, output_slots=slots,
-            )
-        else:
-            local = spin_fock_direct_dft(
-                driver, obj, p_alpha, p_beta, atmlst=atmlst, nobeta_p0=p0,
-                jk_ledger=ledger, output_slots=slots,
-            )
+        local = spin_fock_direct(
+            driver, obj, p_alpha, p_beta, atmlst=atmlst, nobeta_p0=p0,
+            jk_ledger=ledger, output_slots=slots,
+        )
         contractions = ledger.contract(driver, obj.mol, atmlst, slots=slots)
         for index, slot in enumerate(slots):
             local[index] += contractions[slot]
@@ -228,10 +213,7 @@ def _apply_reference_responses(tdobj, densities, max_memory=None):
             None, None, fxc_ref, max_memory=max_memory,
         )
         if xctype == "LDA":
-            vref1 = ni.nr_rks_fxc(
-                mol, mf.grids, mf.xc, None, dms, 0, 0,
-                None, None, fxc_ref, max_memory=max_memory,
-            )
+            vref1 = vref0.copy()
         elif xctype == "GGA":
             vref1 = nttda_mod.nr_rks_fxc1_gga(
                 ni, mol, mf.grids, mf.xc, dms, fxc_ref,
@@ -476,17 +458,6 @@ def _contract_derivative_terms(
                     gradients[term.slot][k] += term.scale * value
 
 
-def _reference_spin_densities(tdobj):
-    mf = tdobj._scf
-    if getattr(mf, "is_average_occupation_reference", False):
-        return tuple(np.asarray(dm) for dm in mf.make_rdm1s())
-    mo = np.asarray(mf.mo_coeff)
-    return (
-        mo[:, mf.mo_occ > 0] @ mo[:, mf.mo_occ > 0].T,
-        mo[:, mf.mo_occ == 2] @ mo[:, mf.mo_occ == 2].T,
-    )
-
-
 def _spin_probe_stacks(p_alpha, p_beta):
     p_alpha = np.asarray(p_alpha)
     p_beta = np.asarray(p_beta)
@@ -497,10 +468,10 @@ def _spin_probe_stacks(p_alpha, p_beta):
     return p_alpha, p_beta, single_probe
 
 
-def spin_fock_direct_dft(
+def spin_fock_direct(
         gradient_driver, tdobj, p_alpha, p_beta, atmlst=None,
         nobeta_p0=None, jk_ledger=None, output_slots=None):
-    """Differentiate one or more ordinary UKS Fock scalar probes.
+    """Differentiate one or more HF/DFT spin Fock scalar probes.
 
     The optional ``nobeta_p0`` correction belongs to the first, explicit-direct
     probe in the batch.
@@ -547,93 +518,48 @@ def spin_fock_direct_dft(
         ledger.add("j", output_slots[probe], j_terms)
         ledger.add("k", output_slots[probe], k_terms)
     xctype = ni._xc_type(mf.xc)
-    if xctype == "LDA":
-        derivative_contractor = xc_backend.contract_lda_vxc_derivative
-    elif xctype == "GGA":
-        derivative_contractor = xc_backend.contract_gga_vxc_derivative
-    elif xctype == "MGGA":
-        derivative_contractor = xc_backend.contract_mgga_vxc_derivative
-    else:
-        raise NotImplementedError(
-            "ordinary Fock direct derivative is not implemented for %s" %
-            xctype
-        )
-    if (nobeta_p0 is not None and tdobj.nobeta
-            and not getattr(mf, "is_average_occupation_reference", False)):
-        density0 = 0.5 * (density_alpha + density_beta)
-        actual_probe_alpha = np.array(p_alpha, copy=True)
-        actual_probe_beta = np.array(p_beta, copy=True)
-        actual_probe_alpha[0] -= 0.5 * nobeta_p0
-        actual_probe_beta[0] -= 0.5 * nobeta_p0
-    else:
-        density0 = None
-        actual_probe_alpha = p_alpha
-        actual_probe_beta = p_beta
-    gradient += derivative_contractor(
-        mf,
-        density_alpha,
-        density_beta,
-        actual_probe_alpha,
-        actual_probe_beta,
-        atmlst=atmlst,
-        max_memory=gradient_driver.max_memory,
-    )
-    if density0 is not None:
-        gradient[0] += derivative_contractor(
+    if xctype != "HF":
+        if xctype == "LDA":
+            derivative_contractor = xc_backend.contract_lda_vxc_derivative
+        elif xctype == "GGA":
+            derivative_contractor = xc_backend.contract_gga_vxc_derivative
+        elif xctype == "MGGA":
+            derivative_contractor = xc_backend.contract_mgga_vxc_derivative
+        else:
+            raise NotImplementedError(
+                "ordinary Fock direct derivative is not implemented for %s" %
+                xctype
+            )
+        if (nobeta_p0 is not None and tdobj.nobeta
+                and not getattr(mf, "is_average_occupation_reference", False)):
+            density0 = 0.5 * (density_alpha + density_beta)
+            actual_probe_alpha = np.array(p_alpha, copy=True)
+            actual_probe_beta = np.array(p_beta, copy=True)
+            actual_probe_alpha[0] -= 0.5 * nobeta_p0
+            actual_probe_beta[0] -= 0.5 * nobeta_p0
+        else:
+            density0 = None
+            actual_probe_alpha = p_alpha
+            actual_probe_beta = p_beta
+        gradient += derivative_contractor(
             mf,
-            density0,
-            density0,
-            0.5 * nobeta_p0,
-            0.5 * nobeta_p0,
+            density_alpha,
+            density_beta,
+            actual_probe_alpha,
+            actual_probe_beta,
             atmlst=atmlst,
             max_memory=gradient_driver.max_memory,
         )
-    if jk_ledger is None:
-        contractions = local_ledger.contract(
-            gradient_driver, mol, atmlst, slots=output_slots,
-        )
-        for probe, slot in enumerate(output_slots):
-            gradient[probe] += contractions[slot]
-    return gradient[0] if single_probe else gradient
-
-
-def spin_fock_direct_hf(
-        gradient_driver, tdobj, p_alpha, p_beta, atmlst=None,
-        jk_ledger=None, output_slots=None):
-    """Differentiate one or more spin-resolved HF Fock scalar probes."""
-    mol = tdobj.mol
-    if atmlst is None:
-        atmlst = range(mol.natm)
-    atmlst = tuple(atmlst)
-    p_alpha, p_beta, single_probe = _spin_probe_stacks(
-        p_alpha, p_beta,
-    )
-    if output_slots is None:
-        output_slots = tuple(range(len(p_alpha)))
-    p_total = p_alpha + p_beta
-    dm_alpha, dm_beta = _reference_spin_densities(tdobj)
-    gradient = np.zeros((len(p_alpha), len(atmlst), 3))
-
-    hcore_derivative = rhf_grad.Gradients(tdobj._scf).hcore_generator(mol)
-    for k, atom in enumerate(atmlst):
-        gradient[:, k] += lib.einsum(
-            "npq,xpq->nx", p_total, hcore_derivative(atom),
-        )
-    local_ledger = _JKDerivativeLedger()
-    ledger = jk_ledger if jk_ledger is not None else local_ledger
-    for probe in range(len(p_alpha)):
-        ledger.add(
-            "j", output_slots[probe], (
-                (p_total[probe], dm_alpha, 1.0, None),
-                (p_total[probe], dm_beta, 1.0, None),
-            ),
-        )
-        ledger.add(
-            "k", output_slots[probe], (
-                (p_alpha[probe], dm_alpha, -1.0, None),
-                (p_beta[probe], dm_beta, -1.0, None),
-            ),
-        )
+        if density0 is not None:
+            gradient[0] += derivative_contractor(
+                mf,
+                density0,
+                density0,
+                0.5 * nobeta_p0,
+                0.5 * nobeta_p0,
+                atmlst=atmlst,
+                max_memory=gradient_driver.max_memory,
+            )
     if jk_ledger is None:
         contractions = local_ledger.contract(
             gradient_driver, mol, atmlst, slots=output_slots,
@@ -745,3 +671,73 @@ def fockz_hfx_terms(
                 gradient_driver, mol, atmlst, slots=(output_slot,),
             )[output_slot]
     return xc_backend.XCGradientTerms(q_alpha, q_beta, direct)
+
+
+def fock_probes(tdobj, projections):
+    """AO probes of the explicit F0/Fz scalar for either spin channel."""
+    p0 = np.zeros((tdobj.mol.nao_nr(), tdobj.mol.nao_nr()))
+    pz = np.zeros_like(p0)
+    for term in projections:
+        density = term.density()
+        p0 += term.weight_f0 * density
+        pz += term.weight_fz * density
+    return p0, pz
+
+
+def fock_projection_q(tdobj, projections, operators, probes):
+    """Differentiate the Fock projections and the reference density.
+
+    HF spin probes include the full Fz response. DFT adds Fz and nobeta
+    corrections during gradient assembly, after the common F0 response.
+    """
+    mf = tdobj._scf
+    mo = np.asarray(mf.mo_coeff)
+    fock0, fockz = (mo.conj().T @ operator @ mo for operator in operators)
+    q_alpha = np.zeros((mo.shape[1], mo.shape[1]))
+    q_beta = np.zeros_like(q_alpha)
+    is_hf = mf._numint._xc_type(mf.xc) == "HF"
+    for term in projections:
+        left, right = term.left_indices, term.right_indices
+        coefficient = term.coefficient
+        def project(target, operator, scale):
+            if scale:
+                target[:, left] += scale * operator[:, right] @ coefficient.T
+                target[:, right] += scale * operator[:, left] @ coefficient
+        project(q_alpha, fock0, 0.5 * term.weight_f0)
+        project(q_beta, fock0, 0.5 * term.weight_f0)
+        if is_hf:
+            project(q_alpha, fockz, 0.5 * term.weight_fz)
+            project(q_beta, fockz, 0.5 * term.weight_fz)
+        else:
+            project(q_alpha, fockz, term.weight_fz)
+    p0, pz = probes
+    p_alpha, p_beta = 0.5 * p0, 0.5 * p0
+    if is_hf:
+        p_alpha = p_alpha + 0.5 * pz
+        p_beta = p_beta - 0.5 * pz
+    response_alpha, response_beta = _fock_response_q(tdobj, p_alpha, p_beta)
+    return q_alpha + response_alpha, q_beta + response_beta
+
+
+def response_potentials(densities, vref0, vref1, terms):
+    """Vary both transition-density factors of the response scalar."""
+    potentials = {label: np.zeros_like(dm) for label, dm in densities.items()}
+    for term in terms:
+        if term.vref0:
+            potentials[term.target] += term.vref0 * vref0[term.source]
+            potentials[term.source] += term.vref0 * vref0[term.target]
+        if term.vref1:
+            potentials[term.target] += term.vref1 * vref1[term.source]
+            potentials[term.source] += term.vref1 * vref1[term.target]
+    return potentials
+
+
+def response_projection_q(tdobj, channel_data, max_memory=None, hfx_only=False):
+    """MO derivative of the response at fixed kernels, for either channel."""
+    _spaces, _amplitudes, densities, blocks, terms = channel_data
+    if hfx_only:
+        vref0, vref1 = _apply_hfx_responses(tdobj, densities)
+    else:
+        vref0, vref1 = _apply_reference_responses(tdobj, densities, max_memory)
+    potentials = response_potentials(densities, vref0, vref1, terms)
+    return xc_backend._project_channel_potentials(tdobj, potentials, blocks)

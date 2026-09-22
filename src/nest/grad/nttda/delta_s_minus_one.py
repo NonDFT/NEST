@@ -17,10 +17,12 @@ from .common import (
     orbital_spaces,
     pair_density,
     FockProjection,
-    _fock_response_q,
+    fock_probes,
+    fock_projection_q,
+    response_projection_q,
     ResponseTerm,
     _apply_reference_responses,
-    _apply_hfx_responses,
+
 )
 
 
@@ -231,15 +233,8 @@ def spin_lowering_fock_projections(tdobj, xy):
 
 
 def spin_lowering_fock_probes(tdobj, xy):
-    """Return AO probes ``P0,Pz`` for the lowering Fock ledger."""
-    nao = tdobj.mol.nao_nr()
-    p0 = np.zeros((nao, nao))
-    pz = np.zeros_like(p0)
-    for term in spin_lowering_fock_projections(tdobj, xy):
-        density = term.density()
-        p0 += term.weight_f0 * density
-        pz += term.weight_fz * density
-    return p0, pz
+    """AO probes of the channel's explicit Fock scalar."""
+    return fock_probes(tdobj, spin_lowering_fock_projections(tdobj, xy))
 
 
 def spin_lowering_fock_scalar(tdobj, xy, max_memory=None):
@@ -290,101 +285,6 @@ def spin_lowering_action_scalar(tdobj, xy):
     return float(np.vdot(vector, action).real)
 
 
-def _response_potentials(densities, vref0, vref1, terms):
-    potentials = {label: np.zeros_like(dm) for label, dm in densities.items()}
-    for term in terms:
-        if term.vref0:
-            potentials[term.target] += term.vref0 * vref0[term.source]
-            potentials[term.source] += term.vref0 * vref0[term.target]
-        if term.vref1:
-            potentials[term.target] += term.vref1 * vref1[term.source]
-            potentials[term.source] += term.vref1 * vref1[term.target]
-    return potentials
-
-
-def _project_transition_potentials(tdobj, blocks, potentials):
-    mo = np.asarray(tdobj._scf.mo_coeff)
-    q_alpha = np.zeros((mo.shape[1], mo.shape[1]))
-    q_beta = np.zeros_like(q_alpha)
-    for label, (target, source, coefficient) in blocks.items():
-        potential = mo.conj().T @ potentials[label] @ mo
-        q_beta[:, target] += potential[:, source] @ coefficient.T
-        q_alpha[:, source] += potential[target, :].T @ coefficient
-    return q_alpha, q_beta
-
-
-def spin_lowering_response_projection_q(
-        tdobj, xy, max_memory=None, hfx_only=False):
-    """Transition-factor derivative of the lowering response scalar."""
-    spaces, amplitudes, densities = spin_lowering_transition_densities(
-        tdobj, xy,
-    )
-    blocks = spin_lowering_block_data(spaces, amplitudes)
-    if hfx_only:
-        vref0, vref1 = _apply_hfx_responses(tdobj, densities)
-    else:
-        vref0, vref1 = _apply_reference_responses(
-            tdobj, densities, max_memory=max_memory,
-        )
-    potentials = _response_potentials(
-        densities,
-        vref0,
-        vref1,
-        spin_lowering_response_terms(spaces.spin),
-    )
-    return _project_transition_potentials(tdobj, blocks, potentials)
-
-
-def spin_lowering_fock_q(tdobj, xy, max_memory=None):
-    """Explicit-Fock projection and reference-density response M matrices."""
-    mf = tdobj._scf
-    mo = np.asarray(mf.mo_coeff)
-    nmo = mo.shape[1]
-    fock0, fockz = spin_lowering_fock0_fockz(
-        tdobj, max_memory=max_memory,
-    )
-    fock0_mo = mo.conj().T @ fock0 @ mo
-    fockz_mo = mo.conj().T @ fockz @ mo
-    q_alpha = np.zeros((nmo, nmo))
-    q_beta = np.zeros_like(q_alpha)
-    is_hf = mf._numint._xc_type(mf.xc) == "HF"
-
-    for term in spin_lowering_fock_projections(tdobj, xy):
-        left = term.left_indices
-        right = term.right_indices
-        coefficient = term.coefficient
-
-        def project(target, operator, scale):
-            if scale:
-                target[:, left] += (
-                    scale * operator[:, right] @ coefficient.T
-                )
-                target[:, right] += (
-                    scale * operator[:, left] @ coefficient
-                )
-
-        project(q_alpha, fock0_mo, 0.5 * term.weight_f0)
-        project(q_beta, fock0_mo, 0.5 * term.weight_f0)
-        if is_hf:
-            project(q_alpha, fockz_mo, 0.5 * term.weight_fz)
-            project(q_beta, fockz_mo, 0.5 * term.weight_fz)
-        else:
-            project(q_alpha, fockz_mo, term.weight_fz)
-
-    p0, pz = spin_lowering_fock_probes(tdobj, xy)
-    p_alpha = 0.5 * p0
-    p_beta = 0.5 * p0
-    if is_hf:
-        p_alpha = p_alpha + 0.5 * pz
-        p_beta = p_beta - 0.5 * pz
-    response_alpha, response_beta = _fock_response_q(
-        tdobj, p_alpha, p_beta,
-    )
-    q_alpha += response_alpha
-    q_beta += response_beta
-    return q_alpha, q_beta
-
-
 # Channel assembly
 
 def grad_elec(
@@ -399,10 +299,11 @@ def grad_elec(
     blocks = spin_lowering_block_data(spaces, amplitudes)
     response_terms = spin_lowering_response_terms(spaces.spin)
     channel_data = (spaces, amplitudes, densities, blocks, response_terms)
-    p0, pz = spin_lowering_fock_probes(tdobj, xy)
+    projections = spin_lowering_fock_projections(tdobj, xy)
+    probes = fock_probes(tdobj, projections)
     return assemble_gradient(
-        gradient_driver, tdobj, channel_data, (p0, pz),
-        spin_lowering_fock_q(tdobj, xy),
-        spin_lowering_response_projection_q(tdobj, xy, hfx_only=True),
+        gradient_driver, tdobj, channel_data, probes,
+        fock_projection_q(tdobj, projections, spin_lowering_fock0_fockz(tdobj), probes),
+        response_projection_q(tdobj, channel_data, hfx_only=True),
         atmlst=atmlst, tolerance=tolerance, max_cycle=max_cycle,
     )
