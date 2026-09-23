@@ -633,7 +633,7 @@ def gen_vind_sfd(td):
     virt_cols = slice(nos, None)
 
     s = nos * 0.5
-    assert s >= 0.5, 'NTTDA for Sf=Si-1 only supports case that Si>=1.'
+    assert s >= 1, 'NTTDA for Sf=Si-1 only supports case that Si>=1.'
     assert s == (mf.mol.nelec[0] - mf.mol.nelec[1]) * 0.5
 
     log = logger.new_logger(td)
@@ -761,8 +761,29 @@ class NTTDA(TDBase):
 
     deltaS = -1
     nobeta = False
+    singlet = None
 
     _keys = {'deltaS', 'nobeta'}
+
+    def dump_flags(self, verbose=None):
+        TDBase.dump_flags(self, verbose)
+        log = logger.new_logger(self, verbose)
+        s = self.mol.spin * 0.5
+        log.info('deltaS = %s (Si = %g -> Sf = %g)', self.deltaS, s, s + self.deltaS)
+        if self.nobeta:
+            log.info('Numerical stabilization enabled to avoid potential divergence '
+                     'at low local beta-electron density')
+        if self.deltaS == -1:
+            log.info('Redundant zero-energy state excluded from the excitation calculation')
+        return self
+
+    def check_sanity(self):
+        if self.deltaS not in (-1, 0, 1):
+            raise ValueError('deltaS must be -1, 0, or 1')
+        if not isinstance(self.nstates, (int, np.integer)) or self.nstates <= 0:
+            raise ValueError('nstates must be a positive integer')
+        TDBase.check_sanity(self)
+        return self
 
     def init_guess(self, hdiag, nstates=None):
         if nstates is None:
@@ -776,16 +797,16 @@ class NTTDA(TDBase):
     def kernel(self, x0=None, nstates=None):
         cpu0 = (logger.process_clock(), logger.perf_counter())
 
-        self.check_sanity()
-        self.dump_flags()
-
         if nstates is None:
             nstates = self.nstates
         else:
             self.nstates = nstates
-        if self.deltaS == -1:
-            nstates += 1
-        log = logger.Logger(self.stdout, self.verbose)
+
+        self.check_sanity()
+        if self.verbose >= logger.INFO:
+            self.dump_flags()
+
+        log = logger.new_logger(self)
 
         def all_eigs(w, v, nroots, envs):
             return w, v, np.arange(w.size)
@@ -794,23 +815,43 @@ class NTTDA(TDBase):
             vind, hdiag = self.gen_vind_sc()
             precond = self.get_precond(hdiag)
         elif self.deltaS == -1:
-            vind, hdiag = self.gen_vind_sfd()
-            precond = self.get_precond(hdiag)
+            base_vind, hdiag = self.gen_vind_sfd()
+            base_precond = self.get_precond(hdiag)
             csidx, osidx, vsidx = _orbital_indices(self)
-            nocc = len(csidx) + len(osidx)
-            nvir = len(osidx) + len(vsidx)
+            ncs, nos = len(csidx), len(osidx)
+            nocc = ncs + nos
+            nvir = nos + len(vsidx)
+            nstates = min(nstates, hdiag.size - 1)
+            self.nstates = nstates
+            open_diag = np.arange(nos)
+
+            def project(zs):
+                # Remove only the OO identity direction; keep the stored layout.
+                projected = np.array(zs, copy=True)
+                oo = projected.reshape(-1, nocc, nvir)[:, ncs:, :nos]
+                trace = np.trace(oo, axis1=1, axis2=2) / nos
+                oo[:, open_diag, open_diag] -= trace[:, None]
+                return projected
+
+            def vind(zs):
+                return project(base_vind(project(zs)))
+
+            def precond(residual, energy):
+                # Unequal diagonal denominators can reintroduce the OO trace.
+                return project(base_precond(residual, energy))
         elif self.deltaS == 1:
             vind, hdiag = self.gen_vind_sfu()
             precond = self.get_precond(hdiag)
             csidx, _, vsidx = _orbital_indices(self)
             ncs = len(csidx)
             nvs = len(vsidx)
-        else:
-            raise ValueError('deltaS should be -1, 0, or 1')
 
         x0sym = None
         if x0 is None:
             x0 = self.init_guess(hdiag)
+        if self.deltaS == -1:
+            # Davidson's initial QR removes dependencies introduced by projection.
+            x0 = project(x0)
 
         self.converged, self.e, x1 = lr_eigh(
             vind,
@@ -830,10 +871,6 @@ class NTTDA(TDBase):
             self.xy = [(xi, 0) for xi in x1]
         elif self.deltaS == -1:
             self.xy = [(xi.reshape(nocc, nvir), 0) for xi in x1]
-            mask = abs(self.e) > 1e-8
-            self.converged = np.asarray(self.converged)[mask]
-            self.e = self.e[mask]
-            self.xy = [xy for xy, keep in zip(self.xy, mask) if keep]
             self.nstates = len(self.e)
         elif self.deltaS == 1:
             self.xy = [(xi.reshape(ncs, nvs), 0) for xi in x1]
@@ -845,6 +882,10 @@ class NTTDA(TDBase):
         log.timer('NTTDA', *cpu0)
         self._finalize()
         return self.e, self.xy
+
+    def get_ab(self):
+        from nest.nttda.get_ab import get_ab
+        return get_ab(self._scf, deltaS=self.deltaS, nobeta=self.nobeta)
 
     gen_vind_sfu = gen_vind_sfu
     gen_vind_sc = gen_vind_sc
