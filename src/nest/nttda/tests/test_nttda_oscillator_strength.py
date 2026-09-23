@@ -50,11 +50,7 @@ class KnownValues(unittest.TestCase):
             [-0.068297131072, -0.365336383706, 0.031212437760],
         ])
         ref_f = np.array([0.007681628385, 0.037787591904, 0.026266335987])
-        # Converge amplitudes more tightly than the observable assertions.
-        # The default residual tolerance (1e-5) leaves dipole outer products
-        # sensitive to the eigensolver's trial-space ordering. Retain small
-        # independent corrections when requesting the tighter residual.
-        td = mf.NTTDA().set(deltaS=-1, nstates=4, conv_tol=1e-9, lindep=1e-18).run()
+        td = mf.NTTDA().set(deltaS=-1, nstates=4).run()
         self.assertTrue(np.all(td.converged))
         dip = td.transition_dipole()
         dip_outer = np.einsum('nx,ny->nxy', dip.conj(), dip)
@@ -68,7 +64,7 @@ class KnownValues(unittest.TestCase):
             [-0.056333525366, 0.071326673082, -0.457181696110],
         ])
         ref_f = np.array([0.067496526009, 0.003926438694, 0.012770953752])
-        td = mf.NTTDA().set(deltaS=0, nstates=4, conv_tol=1e-9, lindep=1e-18).run()
+        td = mf.NTTDA().set(deltaS=0, nstates=4).run()
         self.assertTrue(np.all(td.converged))
         dip = td.transition_dipole()
         dip_outer = np.einsum('nx,ny->nxy', dip.conj(), dip)
@@ -82,7 +78,7 @@ class KnownValues(unittest.TestCase):
             [-1.078796933744, -0.328635627721, -0.013042401171],
         ])
         ref_f = np.array([0.109988279396, 0.000658252112, 0.158300119889])
-        td = mf.NTTDA().set(deltaS=1, nstates=4, conv_tol=1e-9, lindep=1e-18).run()
+        td = mf.NTTDA().set(deltaS=1, nstates=4).run()
         self.assertTrue(np.all(td.converged))
         dip = td.transition_dipole()
         dip_outer = np.einsum('nx,ny->nxy', dip.conj(), dip)

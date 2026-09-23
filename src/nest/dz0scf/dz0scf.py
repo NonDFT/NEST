@@ -55,53 +55,6 @@ def evaluate_high_spin_energy(mf):
     )
 
 class _DZ0VeffMixin:
-    reference_energy_semantics = 'high_spin_roks_energy_on_dz0_orbitals'
-    reference_energy_stationary = False
-    is_average_occupation_reference = True
-
-    def _charge_rks(self):
-        """Return a fresh RKS view used for the spin-unpolarized charge response.
-
-        The view is rebuilt on every call so that a reused mean-field object
-        (``reset(new_mol)``, ``xc`` change, new geometry) never feeds a stale
-        molecule or functional into the response.
-        """
-        charge = dft.rks.RKS(self.mol)
-        for name in (
-                'xc', 'nlc', 'grids', 'nlcgrids', '_numint',
-                'max_memory', 'small_rho_cutoff'):
-            if hasattr(self, name):
-                setattr(charge, name, getattr(self, name))
-        charge.mo_coeff = np.asarray(self.mo_coeff)
-        charge.mo_occ = np.asarray(self.mo_occ)
-        charge.mo_energy = np.asarray(self.mo_energy)
-        charge.verbose = 0
-        return charge
-
-    def make_rdm1s(self, mo_coeff=None, mo_occ=None):
-        """Return equal spin densities ``D/2`` for the spin-unpolarized reference."""
-        if mo_coeff is None:
-            mo_coeff = self.mo_coeff
-        if mo_occ is None:
-            mo_occ = self.mo_occ
-        mo_coeff = np.asarray(mo_coeff)
-        occupation = np.asarray(mo_occ)
-        dm0 = (mo_coeff * occupation) @ mo_coeff.conj().T
-        return 0.5 * dm0, 0.5 * dm0
-
-    def gen_response(self, mo_coeff=None, mo_occ=None, hermi=1, max_memory=None):
-        """Charge-only (spin-unpolarized) linear response of the reference."""
-        if mo_coeff is None:
-            mo_coeff = self.mo_coeff
-        if mo_occ is None:
-            mo_occ = self.mo_occ
-        return self._charge_rks().gen_response(
-            mo_coeff=mo_coeff,
-            mo_occ=mo_occ,
-            hermi=hermi,
-            max_memory=max_memory,
-        )
-
     def get_veff(
         self,
         mol=None,
@@ -130,9 +83,6 @@ class _DZ0VeffMixin:
         )
     def high_spin_energy(self):
         return evaluate_high_spin_energy(self)
-
-    def reference_energy(self):
-        return self.high_spin_energy()
 
     def nuc_grad_method(self):
         """Return the Dz0SCF analytic nuclear-gradient driver."""
