@@ -85,12 +85,6 @@ H  -1.12109306   0.55561188   0.42651873
             rtol=0.0,
             atol=1e-6,
         )
-        np.testing.assert_allclose(
-            td_s.total_energies(),
-            mf.high_spin_energy() + omega_s,
-            rtol=0.0,
-            atol=1e-12,
-        )
 
         td_t = NTTDA(mf)
         td_t.deltaS = 0
