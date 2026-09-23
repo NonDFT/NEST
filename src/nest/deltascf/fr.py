@@ -144,8 +144,7 @@ class FR(lib.StreamObject):
         return self
 
     def kernel(self, mo_coeff=None, mo_occ=None):
-        if self.verbose >= logger.WARN:
-            self.check_sanity()
+        self.check_sanity()
         if self.verbose >= logger.INFO:
             self.dump_flags()
         log = logger.new_logger(self)
