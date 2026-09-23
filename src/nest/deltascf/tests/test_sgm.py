@@ -15,7 +15,6 @@
 
 import unittest
 import numpy
-
 from pyscf import gto
 from nest.deltascf import sgm
 
