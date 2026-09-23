@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2026 The NEST Developers. All Rights Reserved.
+# Copyright 2014-2024 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,11 +27,174 @@ from pyscf.tdscf.uhf import TDBase
 from pyscf.dft.gen_grid import NBINS
 from pyscf import __config__
 from pyscf.dft.numint import _scale_ao_sparse, _dot_ao_ao_sparse, _dot_ao_dm_sparse, _contract_rho_sparse
-from nest._lr_eig import eigh as lr_eigh
+from pyscf.tdscf._lr_eig import eigh as lr_eigh
 from pyscf import symm
 from pyscf.data import nist
 
 MO_BASE = getattr(__config__, 'MO_BASE', 1)
+MO_GRID_FXC1 = True
+
+
+def _is_average_occupation_reference(mf):
+    return getattr(mf, "is_average_occupation_reference", False)
+
+
+def _require_nttda_reference(mf):
+    supported = (
+        dft.roks.ROKS,
+        dft.rks_symm.SymAdaptedROKS,
+    )
+    if not isinstance(mf, supported):
+        raise TypeError("NTTDA response requires a ROKS or Dz0SCF reference")
+
+
+def _reference_fock0(mf, nobeta):
+    """Return the common Fock used by the NTTDA orbital terms.
+
+    A Dz0SCF (average-occupation) reference is self-consistent in
+    ``F0[D/2,D/2]``.  For ROKS, retain the two historical choices controlled
+    by ``nobeta``.
+    """
+    if _is_average_occupation_reference(mf):
+        return np.asarray(mf.get_fock())
+    if nobeta:
+        dma, dmb = mf.make_rdm1()
+        dm0 = 0.5 * (dma + dmb)
+        fock = mf.get_fock(dm=np.array([dm0, dm0]))
+    else:
+        fock = mf.get_fock()
+    return 0.5 * (fock.focka + fock.fockb)
+
+def _fxc1_gga_mo_wv(fxc, t, i):
+    nvec = t.shape[0]
+    ngrids = t.shape[-1]
+    wv = np.empty((nvec, 4, ngrids))
+    t00 = t[:, 0, 0]
+    if i == 0:
+        wv[:, 0] = lib.einsum('ijg,xijg->xg', fxc[:4, :4], t)
+        wv[:, 1:4] = fxc[0, 1:4][None] * t00[:, None]
+        wv[:, 1:4] += lib.einsum('ijg,xig->xjg', fxc[1:4, 1:4], t[:, 1:4, 0])
+    else:
+        wv[:, 0] = fxc[i, 0][None] * t00
+        wv[:, 0] += lib.einsum('jg,xjg->xg', fxc[i, 1:4], t[:, 0, 1:4])
+        wv[:, 1:4] = fxc[i, 1:4][None] * t00[:, None]
+    return wv
+
+def _fxc1_mgga_mo_wv(fxc, t, i):
+    nvec = t.shape[0]
+    ngrids = t.shape[-1]
+    wv = np.empty((nvec, 4, ngrids))
+    t00 = t[:, 0, 0]
+    if i == 0:
+        wv[:, 0] = lib.einsum('ijg,xijg->xg', fxc[:4, :4], t)
+        wv[:, 1:4] = fxc[0, 1:4][None] * t00[:, None]
+        wv[:, 1:4] += lib.einsum('ijg,xig->xjg', fxc[1:4, 1:4], t[:, 1:4, 0])
+        wv[:, 1:4] += 0.5 * fxc[0, 4][None, None] * t[:, 0, 1:4]
+        wv[:, 1:4] += 0.5 * lib.einsum('ig,xijg->xjg', fxc[1:4, 4], t[:, 1:4, 1:4])
+    else:
+        wv[:, 0] = fxc[i, 0][None] * t00
+        wv[:, 0] += lib.einsum('jg,xjg->xg', fxc[i, 1:4], t[:, 0, 1:4])
+        wv[:, 0] += 0.5 * fxc[4, 0][None] * t[:, i, 0]
+        wv[:, 0] += 0.5 * lib.einsum('jg,xjg->xg', fxc[4, 1:4], t[:, i, 1:4])
+        wv[:, 1:4] = fxc[i, 1:4][None] * t00[:, None]
+        wv[:, 1:4] += 0.5 * fxc[i, 4][None, None] * t[:, 0, 1:4]
+        wv[:, 1:4] += 0.5 * fxc[4, 1:4][None] * t[:, i, 0][:, None]
+        wv[:, 1:4] += 0.25 * fxc[4, 4][None, None] * t[:, i, 1:4]
+    return wv
+
+def _fxc1_mo_make_t(x, left_mo, right_mo):
+    '''Build T[x,i,j,g] = L[j,g,a] X[x,a,b] R[i,g,b].
+
+    ``left_mo`` and ``right_mo`` contain AO values and first derivatives
+    projected to the two MO spaces.  The transpose of X lets the inner dot use
+    BLAS over the right-index dimension.
+    '''
+    nvec = x.shape[0]
+    ngrids = left_mo.shape[1]
+    t = np.empty((nvec, 4, 4, ngrids))
+    for num in range(nvec):
+        xt = np.asarray(x[num].T, order='C')
+        for i in range(4):
+            tmp = lib.dot(right_mo[i], xt)
+            for j in range(4):
+                t[num, i, j] = lib.einsum('go,go->g', tmp, left_mo[j])
+    return t
+
+def _fxc1_mo_accumulate(out, left_mo, right_mo, wv, coef):
+    '''Accumulate coef * L[j].T @ diag(wv[x,i,j]) @ R[i] to a MO block.'''
+    if coef == 0:
+        return
+    nvec = out.shape[0]
+    for num in range(nvec):
+        for i in range(4):
+            ri = right_mo[i]
+            for j in range(4):
+                weighted_left = left_mo[j] * wv[num, i, j, :, None]
+                out[num] += coef * lib.dot(weighted_left.T, ri)
+
+def _nr_rks_fxc1_mo(ni, mol, grids, mo_blocks, in_blocks, out_blocks,
+                    terms, fxc, xctype, max_memory=2000):
+    '''Contract the fxc1 kernel directly in selected MO spaces.
+
+    ``in_blocks`` maps an input name to (X, left_mo_key, right_mo_key).
+    ``out_blocks`` maps an output name to its projection MO spaces.
+    ``terms`` is the existing NTTDA linear combination as
+    (input_name, output_name, coefficient).  The function returns MO-basis
+    contributions only; the AO vref0 and hybrid JK paths stay outside.
+    '''
+    if xctype == 'GGA':
+        fill_wv = _fxc1_gga_mo_wv
+    elif xctype == 'MGGA':
+        fill_wv = _fxc1_mgga_mo_wv
+    else:
+        raise ValueError(f'MO-grid fxc1 only supports GGA/MGGA, got {xctype}')
+
+    nao = mol.nao_nr()
+    nvec = next(iter(in_blocks.values()))[0].shape[0]
+    out = {
+        name: np.zeros((nvec, mo_blocks[left_key].shape[1],
+                        mo_blocks[right_key].shape[1]))
+        for name, (left_key, right_key) in out_blocks.items()
+    }
+    needed_mos = set()
+    for x, left_key, right_key in in_blocks.values():
+        needed_mos.add(left_key)
+        needed_mos.add(right_key)
+    for left_key, right_key in out_blocks.values():
+        needed_mos.add(left_key)
+        needed_mos.add(right_key)
+
+    terms_by_input = {}
+    for in_name, out_name, coef in terms:
+        terms_by_input.setdefault(in_name, []).append((out_name, coef))
+
+    p1 = 0
+    for ao, mask, weight, coords in ni.block_loop(mol, grids, nao, 1, max_memory=max_memory):
+        p0, p1 = p1, p1 + weight.size
+        ngrids = weight.size
+        _fxc = fxc[:, :, p0:p1] * weight
+
+        mo_cache = {}
+        for key in needed_mos:
+            coeff = mo_blocks[key]
+            mo = np.empty((4, ngrids, coeff.shape[1]))
+            for i in range(4):
+                mo[i] = lib.dot(ao[i], coeff)
+            mo_cache[key] = mo
+
+        for in_name, (x, left_key, right_key) in in_blocks.items():
+            input_terms = terms_by_input.get(in_name)
+            if not input_terms:
+                continue
+            t = _fxc1_mo_make_t(x, mo_cache[left_key], mo_cache[right_key])
+            wv = np.empty((nvec, 4, 4, ngrids))
+            for i in range(4):
+                wv[:, i] = fill_wv(_fxc, t, i)
+            for out_name, coef in input_terms:
+                out_left_key, out_right_key = out_blocks[out_name]
+                _fxc1_mo_accumulate(out[out_name], mo_cache[out_left_key],
+                                    mo_cache[out_right_key], wv, coef)
+    return out
 
 def nr_rks_fxc1_gga(ni, mol, grids, xc_code, dms, fxc, max_memory=2000):
     nset = dms.shape[0]
@@ -162,8 +325,7 @@ def gen_rohf_response_sfu(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=No
     mol = mf.mol
     if log is None:
         log = logger.new_logger(mf)
-    if not isinstance(mf, (dft.roks.ROKS, dft.rks_symm.SymAdaptedROKS)):
-        raise TypeError('NTTDA response requires ROKS reference')
+    _require_nttda_reference(mf)
 
     ni = mf._numint
     ni.libxc.test_deriv_order(mf.xc, 2, raise_error=True)
@@ -186,7 +348,7 @@ def gen_rohf_response_sfu(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=No
             time_xc = (logger.process_clock(), logger.perf_counter())
             v1ao_cv = ni.nr_rks_fxc(mol, mf.grids, mf.xc, None, dms_cv, 0, hermi,
                                     None, None, fxc_ref, max_memory=max_memory)
-            time_xc = log.timer('NTTDA response_sfu kernel v1ao_cv', *time_xc)
+            time_xc = log.timer('NTTDA response_sfu kernel xc response_cv', *time_xc)
         else:
             v1ao_cv = np.zeros_like(dms_cv)
 
@@ -211,7 +373,8 @@ def gen_rohf_response_sfu(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=No
             delta -= mf.get_k(mol, dmoo, 1, omega=omega) * (alpha - hyb)
     return vind, 0.5 * delta
 
-def gen_rohf_response_sc(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=None, log=None):
+def gen_rohf_response_sc(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=None,
+                         log=None, fxc_ref=None, skip_xc_vref1=False):
     '''
     response function for Sf=Si
     '''
@@ -223,8 +386,7 @@ def gen_rohf_response_sc(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=Non
     mol = mf.mol
     if log is None:
         log = logger.new_logger(mf)
-    if not isinstance(mf, (dft.roks.ROKS, dft.rks_symm.SymAdaptedROKS)):
-        raise TypeError('NTTDA response requires ROKS reference')
+    _require_nttda_reference(mf)
 
     s = (mol.nelec[0] - mol.nelec[1]) * 0.5
 
@@ -233,7 +395,7 @@ def gen_rohf_response_sc(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=Non
     omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, mol.spin)
     hybrid = ni.libxc.is_hybrid_xc(mf.xc)
     xctype = ni._xc_type(mf.xc)
-    if xctype != 'HF':
+    if xctype != 'HF' and fxc_ref is None:
         fxc_d0 = ni.cache_xc_kernel(mol, mf.grids, mf.xc, mo_coeff, mo_occ, 1)[2]
         fxc_ref = 0.5 * (fxc_d0[0, :, 0] - fxc_d0[0, :, 1] - fxc_d0[1, :, 0] + fxc_d0[1, :, 1])
 
@@ -266,7 +428,9 @@ def gen_rohf_response_sc(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=Non
             vref0 = ni.nr_rks_fxc(mol, mf.grids, mf.xc, None, dms0, 0, hermi,
                                   None, None, fxc_ref, max_memory=max_memory)
             time_xc = log.timer('NTTDA response_sc kernel vref0', *time_xc)
-            if xctype == 'LDA':
+            if skip_xc_vref1 and xctype in ('GGA', 'MGGA'):
+                vref1 = np.zeros_like(dms1)
+            elif xctype == 'LDA':
                 vref1 = ni.nr_rks_fxc(mol, mf.grids, mf.xc, None, dms1, 0, hermi,
                                       None, None, fxc_ref, max_memory=max_memory)
             elif xctype =='GGA':
@@ -319,7 +483,8 @@ def gen_rohf_response_sc(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=Non
             delta -= mf.get_k(mol, dmoo, 1, omega=omega) * (alpha - hyb)
     return vind, 0.5 * delta
 
-def gen_rohf_response_sfd(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=None, log=None):
+def gen_rohf_response_sfd(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=None,
+                          log=None, fxc_ref=None, skip_xc_vref1=False):
     '''
     response function for Sf=Si-1
     '''
@@ -331,8 +496,7 @@ def gen_rohf_response_sfd(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=No
     mol = mf.mol
     if log is None:
         log = logger.new_logger(mf)
-    if not isinstance(mf, (dft.roks.ROKS, dft.rks_symm.SymAdaptedROKS)):
-        raise TypeError('NTTDA response requires ROKS reference')
+    _require_nttda_reference(mf)
 
     s = (mol.nelec[0] - mol.nelec[1]) * 0.5
 
@@ -342,7 +506,7 @@ def gen_rohf_response_sfd(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=No
     hybrid = ni.libxc.is_hybrid_xc(mf.xc)
     xctype = ni._xc_type(mf.xc)
 
-    if xctype != 'HF':
+    if xctype != 'HF' and fxc_ref is None:
         fxc_d0 = ni.cache_xc_kernel(mol, mf.grids, mf.xc, mo_coeff, mo_occ, 1)[2]
         fxc_ref = 0.5 * (fxc_d0[0, :, 0] - fxc_d0[0, :, 1] - fxc_d0[1, :, 0] + fxc_d0[1, :, 1])
 
@@ -374,7 +538,9 @@ def gen_rohf_response_sfd(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=No
             vref0 = ni.nr_rks_fxc(mol, mf.grids, mf.xc, None, dms0, 0, hermi,
                                   None, None, fxc_ref, max_memory=max_memory)
             time_xc = log.timer('NTTDA response_sf vref0', *time_xc)
-            if xctype == 'LDA':
+            if skip_xc_vref1 and xctype in ('GGA', 'MGGA'):
+                vref1 = np.zeros_like(dms1)
+            elif xctype == 'LDA':
                 vref1 = ni.nr_rks_fxc(mol, mf.grids, mf.xc, None, dms1, 0, hermi,
                                       None, None, fxc_ref, max_memory=max_memory)
             elif xctype =='GGA':
@@ -444,18 +610,9 @@ def gen_vind_sfu(td):
     vresp, fockz = gen_rohf_response_sfu(mf, mo_coeff=mo_coeff, mo_occ=mo_occ, hermi=0,
                                          max_memory=td.max_memory, log=log)
 
-    if td.nobeta:
-        dma, dmb = mf.make_rdm1()
-        dm0 = 0.5 * (dma + dmb)
-        fock = mf.get_fock(dm=np.array([dm0, dm0]))
-        fock0 = 0.5 * (fock.focka + fock.fockb)
-        focka = fock0 + fockz
-        fockb = fock0 - fockz
-    else:
-        fock = mf.get_fock()
-        fock0 = 0.5 * (fock.focka + fock.fockb)
-        focka = fock0 + fockz
-        fockb = fock0 - fockz
+    fock0 = _reference_fock0(mf, td.nobeta)
+    focka = fock0 + fockz
+    fockb = fock0 - fockz
 
     fock_v = orbvs.T @ focka @ orbvs
     fock_c = orbcs.T @ fockb @ orbcs
@@ -492,6 +649,7 @@ def gen_vind_sc(td):
     orbcs = mo_coeff[:, csidx]
     orbos = mo_coeff[:, osidx]
     orbvs = mo_coeff[:, vsidx]
+    mo_blocks = {'c': orbcs, 'o': orbos, 'v': orbvs}
     ncs = orbcs.shape[1]
     nos = orbos.shape[1]
     nvs = orbvs.shape[1]
@@ -502,21 +660,22 @@ def gen_vind_sc(td):
     assert s == (mf.mol.nelec[0] - mf.mol.nelec[1]) * 0.5
 
     log = logger.new_logger(td)
+    xctype = mf._numint._xc_type(mf.xc)
+    use_mo_grid_fxc1 = MO_GRID_FXC1 and xctype in ('GGA', 'MGGA')
+    fxc_ref = None
+    if use_mo_grid_fxc1:
+        fxc_d0 = mf._numint.cache_xc_kernel(mf.mol, mf.grids, mf.xc,
+                                            mo_coeff, mo_occ, 1)[2]
+        fxc_ref = 0.5 * (fxc_d0[0, :, 0] - fxc_d0[0, :, 1] -
+                         fxc_d0[1, :, 0] + fxc_d0[1, :, 1])
     vresp, fockz = gen_rohf_response_sc(mf, mo_coeff=mo_coeff, mo_occ=mo_occ, hermi=0,
-                                        max_memory=td.max_memory, log=log)
+                                        max_memory=td.max_memory, log=log,
+                                        fxc_ref=fxc_ref,
+                                        skip_xc_vref1=use_mo_grid_fxc1)
 
-    if td.nobeta:
-        dma, dmb = mf.make_rdm1()
-        dm0 = 0.5 * (dma + dmb)
-        fock = mf.get_fock(dm=np.array([dm0, dm0]))
-        fock0 = 0.5 * (fock.focka + fock.fockb)
-        focka = fock0 + fockz
-        fockb = fock0 - fockz
-    else:
-        fock = mf.get_fock()
-        fock0 = 0.5 * (fock.focka + fock.fockb)
-        focka = fock0 + fockz
-        fockb = fock0 - fockz
+    fock0 = _reference_fock0(mf, td.nobeta)
+    focka = fock0 + fockz
+    fockb = fock0 - fockz
 
     fock_coco1 = orbos.T @ (fock0 - fockz) @ orbos
     fock_coco2 = orbcs.T @ (fock0 - fockz) @ orbcs
@@ -565,6 +724,37 @@ def gen_vind_sc(td):
         v1mo_ov = lib.einsum('xpq,qo,pv->xov', v1ao_ov, orbos, orbvs.conj())
         v1mo_cv0 = lib.einsum('xpq,qo,pv->xov', v1ao_cv0, orbcs, orbvs.conj())
         time1 = log.timer('NTTDA gen_vind_sc AO->MO transform', *time1)
+
+        if use_mo_grid_fxc1:
+            time_mo = (logger.process_clock(), logger.perf_counter())
+            in_blocks = {
+                'co': (zs_co, 'c', 'o'),
+                'ov': (zs_ov, 'o', 'v'),
+                'cv0': (zs_cv0, 'c', 'v'),
+            }
+            out_blocks = {
+                'co': ('c', 'o'),
+                'ov': ('o', 'v'),
+                'cv0': ('c', 'v'),
+            }
+            terms = (
+                ('co', 'co', -1.0),
+                ('ov', 'co', 1.0),
+                ('cv0', 'co', -np.sqrt(2.0)),
+                ('co', 'ov', 1.0),
+                ('ov', 'ov', -1.0),
+                ('cv0', 'ov', np.sqrt(2.0)),
+                ('co', 'cv0', -np.sqrt(2.0)),
+                ('ov', 'cv0', np.sqrt(2.0)),
+                ('cv0', 'cv0', -2.0),
+            )
+            vref1_mo = _nr_rks_fxc1_mo(
+                mf._numint, mf.mol, mf.grids, mo_blocks, in_blocks,
+                out_blocks, terms, fxc_ref, xctype, max_memory=td.max_memory)
+            v1mo_co += vref1_mo['co']
+            v1mo_ov += vref1_mo['ov']
+            v1mo_cv0 += vref1_mo['cv0']
+            time1 = log.timer('NTTDA gen_vind_sc MO-grid vref1', *time_mo)
 
         v1mo_co += lib.einsum('uv,xiv->xiu', fock_coco1, zs_co)
         v1mo_co -= lib.einsum('ji,xju->xiu', fock_coco2, zs_co)
@@ -622,6 +812,7 @@ def gen_vind_sfd(td):
     orbcs = mo_coeff[:, csidx]
     orbos = mo_coeff[:, osidx]
     orbvs = mo_coeff[:, vsidx]
+    mo_blocks = {'c': orbcs, 'o': orbos, 'v': orbvs}
     ncs = orbcs.shape[1]
     nos = orbos.shape[1]
     nvs = orbvs.shape[1]
@@ -637,17 +828,20 @@ def gen_vind_sfd(td):
     assert s == (mf.mol.nelec[0] - mf.mol.nelec[1]) * 0.5
 
     log = logger.new_logger(td)
+    xctype = mf._numint._xc_type(mf.xc)
+    use_mo_grid_fxc1 = MO_GRID_FXC1 and xctype in ('GGA', 'MGGA')
+    fxc_ref = None
+    if use_mo_grid_fxc1:
+        fxc_d0 = mf._numint.cache_xc_kernel(mf.mol, mf.grids, mf.xc,
+                                            mo_coeff, mo_occ, 1)[2]
+        fxc_ref = 0.5 * (fxc_d0[0, :, 0] - fxc_d0[0, :, 1] -
+                         fxc_d0[1, :, 0] + fxc_d0[1, :, 1])
     vresp, fockz = gen_rohf_response_sfd(mf, mo_coeff=mo_coeff, mo_occ=mo_occ, hermi=0,
-                                         max_memory=td.max_memory, log=log)
+                                         max_memory=td.max_memory, log=log,
+                                         fxc_ref=fxc_ref,
+                                         skip_xc_vref1=use_mo_grid_fxc1)
 
-    if td.nobeta:
-        dma, dmb = mf.make_rdm1()
-        dm0 = 0.5 * (dma + dmb)
-        fock = mf.get_fock(dm=np.array([dm0, dm0]))
-        fock0 = 0.5 * (fock.focka + fock.fockb)
-    else:
-        fock = mf.get_fock()
-        fock0 = 0.5 * (fock.focka + fock.fockb)
+    fock0 = _reference_fock0(mf, td.nobeta)
 
     fock_coco0 = orbos.T @ (fock0 - fockz) @ orbos
     fock_coco1 = orbcs.T @ (fock0 + fockz) @ orbcs
@@ -699,6 +893,30 @@ def gen_vind_sfd(td):
         v1mo_oo = lib.einsum('xpq,qo,pv->xov', v1ao_oo, orbos, orbos.conj())
         v1mo_ov = lib.einsum('xpq,qo,pv->xov', v1ao_ov, orbos, orbvs.conj())
         time1 = log.timer('NTTDA gen_vind_sfd AO->MO transform', *time1)
+
+        if use_mo_grid_fxc1:
+            time_mo = (logger.process_clock(), logger.perf_counter())
+            denom = 2 * s - 1
+            in_blocks = {
+                'co': (zs_co, 'c', 'o'),
+                'ov': (zs_ov, 'o', 'v'),
+            }
+            out_blocks = {
+                'co': ('c', 'o'),
+                'ov': ('o', 'v'),
+            }
+            terms = (
+                ('co', 'co', 1.0 / denom),
+                ('ov', 'co', -1.0 / denom),
+                ('co', 'ov', -1.0 / denom),
+                ('ov', 'ov', 1.0 / denom),
+            )
+            vref1_mo = _nr_rks_fxc1_mo(
+                mf._numint, mf.mol, mf.grids, mo_blocks, in_blocks,
+                out_blocks, terms, fxc_ref, xctype, max_memory=td.max_memory)
+            v1mo_co += vref1_mo['co']
+            v1mo_ov += vref1_mo['ov']
+            time1 = log.timer('NTTDA gen_vind_sfd MO-grid vref1', *time_mo)
 
         v1mo_co += lib.einsum('uv,xiv->xiu', fock_coco0, zs_co)
         v1mo_co -= lib.einsum('ji,xju->xiu', fock_coco1, zs_co)
@@ -759,10 +977,30 @@ class NTTDA(TDBase):
     nobeta: True for problemstic cases where there is no local beta electrons
     '''
 
-    deltaS = -1
-    nobeta = False
+    deltaS = getattr(__config__, 'NTTDA_delta_S', -1)
+    nobeta = getattr(__config__, 'NTTDA_nobeta', False)
 
     _keys = {'deltaS', 'nobeta'}
+
+    def reference_energy(self):
+        """Return the reference zero selected by the mean-field object."""
+        selector = getattr(self._scf, 'reference_energy', None)
+        if selector is None:
+            return float(self._scf.e_tot)
+        return float(selector())
+
+    def total_energies(self):
+        """Return ``E_reference + omega`` for the converged NTTDA roots."""
+        if self.e is None:
+            raise RuntimeError('run NTTDA.kernel() before requesting total energies')
+        return self.reference_energy() + np.asarray(self.e)
+
+    def nuc_grad_method(self):
+        """Return the independent NTTDA nuclear-gradient driver."""
+        from nest.grad.nttda import Gradients
+        return Gradients(self)
+
+    Gradients = nuc_grad_method
 
     def init_guess(self, hdiag, nstates=None):
         if nstates is None:
@@ -1250,6 +1488,7 @@ def analyze(tdobj, verbose=None):
 
 
 NTTDA.analyze = analyze
+
 
 dft.roks.ROKS.NTTDA = lib.class_as_method(NTTDA)
 dft.rks_symm.SymAdaptedROKS.NTTDA = lib.class_as_method(NTTDA)
