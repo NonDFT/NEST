@@ -16,21 +16,22 @@
 """Optimize orbitals with average occupations and report the high-spin energy."""
 
 from pyscf import gto
-
 from nest import aocscf  # noqa: F401 - registers ROKS.average_occ()
 
 mol = gto.M(
     atom="""
-    O   0.64372820   0.14077399  -0.04477253
-    O  -0.64862595  -0.12779073  -0.05445498
-    H   1.16027512  -0.65947800   0.36730132
-    H  -1.12109306   0.55561188   0.42651873
+    H  0.000000  0.934473 -0.588078
+    H  0.000000 -0.934473 -0.588078
+    C  0.000000  0.000000  0.000000
+    O  0.000000  0.000000  1.221104
     """,
     basis="6-31g",
     spin=2,
+    symmetry=True
 )
 mf = mol.ROKS(xc="SVWN").average_occ().run()
 
 print(f"SCF converged: {mf.converged}")
 print(f"Average-occupation SCF energy: {mf.e_avg_occ:.12f} Ha")
 print(f"High-spin energy: {mf.e_tot:.12f} Ha")
+mf.analyze(verbose=4)  # same as other SCF methods

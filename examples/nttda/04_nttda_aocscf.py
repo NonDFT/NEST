@@ -30,12 +30,12 @@ mol = gto.M(
     spin=2,
     symmetry=True
 )
-mf = mol.ROKS(xc="CAM-B3LYP").average_occ().run()
-td = mf.NTTDA().set(nstates=2, deltaS=-1).run()
+mf = mol.ROKS(xc="CAM-B3LYP").average_occ()
+mf.kernel()
+td = mf.NTTDA().set(nstates=5, deltaS=-1)
+# nobeta does not work for NTTDA with a average-occupation ROKS reference
+td.kernel()
 
-print(f"SCF converged: {mf.converged}")
-print(f"NTTDA converged: {td.converged}")
-print(f"Excitation energies (Ha): {td.e}")
-print(f"Total energies (Ha): {td.e_tot}", end=", ")
-print(f"which equals to mf.e_tot + td.e: {mf.e_tot + td.e}")
 td.analyze(verbose=4)
+print(f"Total energies (Ha): {td.e_tot}", end=",\n")
+print(f"which equals to mf.e_tot + td.e: {mf.e_tot + td.e}")

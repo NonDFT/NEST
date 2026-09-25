@@ -36,4 +36,8 @@ td = mf.NTTDA()
 td.deltaS = -1  # Final spin: Sf = Si + deltaS. Valid values are -1, 0, and +1.
 td.nobeta = False
 td.nstates = 5
-td.run().analyze(verbose=4)
+td.kernel()
+
+td.analyze(verbose=4)
+print(f"Total energies (Ha): {td.e_tot}", end=",\n")
+print(f"which equals to mf.e_tot + td.e: {mf.e_tot + td.e}")
