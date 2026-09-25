@@ -1,3 +1,17 @@
+# Copyright 2026 The NEST Developers. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import warnings
@@ -66,7 +80,7 @@ def _block_pairs(rows: np.ndarray, cols: np.ndarray) -> tuple[np.ndarray, np.nda
 def _rotation_space(mo_occ: np.ndarray) -> RotationSpace:
     f = np.asarray(mo_occ, dtype=float)
     if f.ndim != 1:
-        raise ValueError(f"Dz0 occupations must be a one-dimensional array; got {f.shape}.")
+        raise ValueError(f"Spin-averaged occupations must be a one-dimensional array; got {f.shape}.")
 
     is_c = np.isclose(f, 2.0, atol=_OCC_TOL, rtol=0.0)
     is_o = np.isclose(f, 1.0, atol=_OCC_TOL, rtol=0.0)
@@ -74,7 +88,7 @@ def _rotation_space(mo_occ: np.ndarray) -> RotationSpace:
     if not np.all(is_c | is_o | is_v):
         bad = np.where(~(is_c | is_o | is_v))[0]
         raise NotImplementedError(
-            "This implementation requires Dz0 occupations 0, 1, or 2. "
+            "This implementation requires occupations 0, 1, or 2. "
             f"Nonstandard occupations were found at MO indices {bad.tolist()}."
         )
 
@@ -88,24 +102,6 @@ def _rotation_space(mo_occ: np.ndarray) -> RotationSpace:
     nalpha = (f > 0.0).astype(float)
     nbeta = np.isclose(f, 2.0, atol=_OCC_TOL, rtol=0.0).astype(float)
     return RotationSpace(p=p, q=q, f=f, nalpha=nalpha, nbeta=nbeta)
-
-
-def _copy_ks_settings(source, target) -> None:
-    """Copy numerical-integration settings without copying unsupported wrappers."""
-    for name in (
-        "xc",
-        "nlc",
-        "grids",
-        "nlcgrids",
-        "_numint",
-        "max_memory",
-        "verbose",
-        "stdout",
-        "direct_scf_tol",
-        "small_rho_cutoff",
-    ):
-        if hasattr(source, name):
-            setattr(target, name, getattr(source, name))
 
 
 def _ao_density(mo_coeff: np.ndarray, occupation: np.ndarray) -> np.ndarray:
@@ -140,7 +136,7 @@ def _fractional_rks_fock_skeleton(
 
     This is PySCF's RKS ``make_h1`` construction with the density corrected
     from ``2 C_occ C_occ^T`` to the fractional-occupation density
-    ``C mo_occ C^T`` required by Dz0SCF.  Range-separated exchange is included
+    ``C mo_occ C^T`` required by spin-averaged SCF.  Range-separated exchange is included
     through PySCF's ``(omega, alpha, hyb)`` decomposition.
     """
     mol = charge_mf.mol
@@ -215,8 +211,8 @@ def _fractional_rks_fock_skeleton(
     return h1ao
 
 
-class DZ0Gradients(lib.StreamObject):
-    """Analytic gradient driver for the Dz0SCF high-spin reference energy."""
+class AverageOccupationGradients(lib.StreamObject):
+    """Analytic gradient of the high-spin energy at spin-averaged SCF orbitals."""
 
     _keys = {
         "base",
@@ -230,7 +226,7 @@ class DZ0Gradients(lib.StreamObject):
         "de",
         "z",
         "g_hs",
-        "g_dz0",
+        "g_avg_occ",
         "b",
         "e_hs_unrelaxed",
     }
@@ -251,7 +247,7 @@ class DZ0Gradients(lib.StreamObject):
         self.de = None
         self.z = None
         self.g_hs = None
-        self.g_dz0 = None
+        self.g_avg_occ = None
         self.b = None
         self.e_hs_unrelaxed = None
 
@@ -269,7 +265,7 @@ class DZ0Gradients(lib.StreamObject):
 
     def dump_flags(self, verbose=None):
         log = logger.new_logger(self, verbose)
-        log.info("******** Dz0SCF high-spin-reference analytic gradient ********")
+        log.info("******** Spin-averaged SCF high-spin analytic gradient ********")
         log.info("Z-vector tolerance = %.3g", self.conv_tol)
         log.info("Z-vector max cycles = %d", self.max_cycle)
         log.info("GMRES restart = %d", self.restart)
@@ -280,26 +276,26 @@ class DZ0Gradients(lib.StreamObject):
         mf = self.base
         mol = self.mol
         if getattr(mf, "mo_coeff", None) is None or getattr(mf, "mo_occ", None) is None:
-            raise RuntimeError("Run Dz0SCF before requesting its analytic gradient.")
+            raise RuntimeError("Run spin-averaged SCF before requesting its analytic gradient.")
         if hasattr(mf, "converged") and not mf.converged:
-            warnings.warn("Dz0SCF is not converged; its analytic gradient is not stationary.")
+            warnings.warn("Spin-averaged SCF is not converged; its analytic gradient is not stationary.")
         if np.iscomplexobj(mf.mo_coeff) and np.max(np.abs(np.asarray(mf.mo_coeff).imag)) > 1e-12:
-            raise NotImplementedError("Complex-orbital Dz0SCF gradients are not implemented.")
+            raise NotImplementedError("Complex-orbital spin-averaged gradients are not implemented.")
         if self.grid_response:
             raise NotImplementedError(
                 "Moving-grid response is not implemented consistently in B^(0,A); "
                 "use grid_response=False."
             )
         if getattr(mf, "with_df", None) is not None:
-            raise NotImplementedError("Density-fitted Dz0SCF gradients are not implemented.")
+            raise NotImplementedError("Density-fitted spin-averaged gradients are not implemented.")
         if getattr(mf, "with_x2c", None) is not None:
-            raise NotImplementedError("X2C Dz0SCF gradients are not implemented.")
+            raise NotImplementedError("X2C spin-averaged gradients are not implemented.")
         if getattr(mf, "with_solvent", None) is not None:
-            raise NotImplementedError("Solvent-response Dz0SCF gradients are not implemented.")
+            raise NotImplementedError("Solvent-response spin-averaged gradients are not implemented.")
         if hasattr(mf, "do_nlc") and mf.do_nlc():
-            raise NotImplementedError("Nonlocal-correlation (NLC/VV10) Dz0SCF gradients are not implemented.")
+            raise NotImplementedError("Nonlocal-correlation (NLC/VV10) spin-averaged gradients are not implemented.")
         if hasattr(mf, "do_disp") and mf.do_disp():
-            raise NotImplementedError("Dispersion-corrected Dz0SCF gradients are not implemented.")
+            raise NotImplementedError("Dispersion-corrected spin-averaged gradients are not implemented.")
         if getattr(mol, "dimension", 3) != 3:
             raise NotImplementedError("Only molecular (three-dimensional) calculations are supported.")
 
@@ -309,10 +305,9 @@ class DZ0Gradients(lib.StreamObject):
         c0 = np.asarray(mf.mo_coeff).real
         space = _rotation_space(np.asarray(mf.mo_occ))
 
-        # Do not call the dft.RKS factory here: for mol.spin != 0 it returns
-        # ROKS, whereas R^(0) is the spin-unpolarized, charge-only RKS kernel.
-        charge_mf = dft.rks.RKS(mol)
-        _copy_ks_settings(mf, charge_mf)
+        # The factory dft.RKS returns ROKS when mol.spin != 0.  A view keeps
+        # the reference's numerical settings but selects the RKS charge kernel.
+        charge_mf = lib.view(mf, dft.rks.RKS)
         charge_mf.mo_coeff = c0
         charge_mf.mo_occ = space.f
 
@@ -331,8 +326,7 @@ class DZ0Gradients(lib.StreamObject):
             with_nlc=False,
         )
 
-        hs_mf = dft.ROKS(mol)
-        _copy_ks_settings(mf, hs_mf)
+        hs_mf = lib.view(mf, dft.roks.ROKS)
         hs_mf.mo_coeff = c0
         hs_mf.mo_occ = space.f
         dm_hs = hs_mf.make_rdm1(c0, space.f)
@@ -359,7 +353,7 @@ class DZ0Gradients(lib.StreamObject):
         self._w_hs_mo = w_hs_mo
 
         gap = space.occupation_gap
-        self.g_dz0 = 2.0 * gap * space.pack(f0mo)
+        self.g_avg_occ = 2.0 * gap * space.pack(f0mo)
         self.g_hs = 2.0 * (
             (space.nalpha[space.q] - space.nalpha[space.p]) * space.pack(f_hs_mo[0])
             + (space.nbeta[space.q] - space.nbeta[space.p]) * space.pack(f_hs_mo[1])
@@ -393,7 +387,7 @@ class DZ0Gradients(lib.StreamObject):
             dtype=float,
         )
 
-        # The exact real-orbital Dz0 Hessian is symmetric, so A^T z = g_HS
+        # The exact real-orbital spin-averaged Hessian is symmetric, so A^T z = g_HS
         # is solved with the same matrix-free action.  This diagonal contains
         # the one-electron commutator part and is used only as a preconditioner.
         diagonal = 2.0 * space.occupation_gap * (
@@ -428,9 +422,9 @@ class DZ0Gradients(lib.StreamObject):
         if info != 0:
             last = residuals[-1] if residuals else np.nan
             raise RuntimeError(
-                "Dz0 Z-vector GMRES did not converge: "
+                "Spin-averaged Z-vector GMRES did not converge: "
                 f"info={info}, last preconditioned residual={last:.3e}. "
-                "Increase max_cycle/restart or inspect a near-singular Dz0 orbital Hessian."
+                "Increase max_cycle/restart or inspect a near-singular orbital Hessian."
             )
         return z
 
@@ -513,18 +507,18 @@ class DZ0Gradients(lib.StreamObject):
         return b.real
 
     def kernel(self, atmlst=None, verbose=None) -> np.ndarray:
-        """Compute and return the Dz0SCF high-spin-reference nuclear gradient."""
+        """Compute the high-spin nuclear gradient at spin-averaged orbitals."""
         log = logger.new_logger(self, verbose)
         self._validate()
         self.dump_flags(verbose)
         self._build_intermediates()
 
-        max_g0 = float(np.max(np.abs(self.g_dz0))) if self.g_dz0.size else 0.0
-        log.info("max |g_Dz0| = %.6g", max_g0)
+        max_g0 = float(np.max(np.abs(self.g_avg_occ))) if self.g_avg_occ.size else 0.0
+        log.info("max |g_avg_occ| = %.6g", max_g0)
         scf_grad_tol = getattr(self.base, "conv_tol_grad", 0.0) or 0.0
         if max_g0 > max(1e-6, 100.0 * scf_grad_tol):
             warnings.warn(
-                f"The packed Dz0 orbital gradient is not small (max={max_g0:.3e}); "
+                f"The packed spin-averaged orbital gradient is not small (max={max_g0:.3e}); "
                 "the analytic-gradient stationarity equation may be inaccurate."
             )
 
@@ -542,7 +536,7 @@ class DZ0Gradients(lib.StreamObject):
         self.de = result
 
         if log.verbose >= logger.NOTE:
-            logger.note(self, "--------------- Dz0SCF reference gradients ---------------")
+            logger.note(self, "------------ Spin-averaged reference gradients ------------")
             rhf_grad._write(log, self.mol, result, atmlst)
             logger.note(self, "----------------------------------------------------------")
         return result
@@ -550,13 +544,7 @@ class DZ0Gradients(lib.StreamObject):
     grad = kernel
 
 
-Gradients = DZ0Gradients
-Grad = DZ0Gradients
+Gradients = AverageOccupationGradients
 
 
-def nuc_grad_method(mf) -> DZ0Gradients:
-    """Functional constructor useful before binding the class as a method."""
-    return DZ0Gradients(mf)
-
-
-__all__ = ["DZ0Gradients", "Gradients", "Grad", "RotationSpace", "nuc_grad_method"]
+__all__ = ["AverageOccupationGradients", "Gradients"]

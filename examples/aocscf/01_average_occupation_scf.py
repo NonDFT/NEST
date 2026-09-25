@@ -13,10 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""nest package."""
+"""Optimize orbitals with average occupations and report the high-spin energy."""
 
-from nest import aocscf, nttda, sftda
+from pyscf import gto
 
-__version__ = "0.1.0"
+from nest import aocscf  # noqa: F401 - registers ROKS.average_occ()
 
-__all__ = ["__version__", "aocscf", "nttda", "sftda"]
+mol = gto.M(
+    atom="""
+    O   0.64372820   0.14077399  -0.04477253
+    O  -0.64862595  -0.12779073  -0.05445498
+    H   1.16027512  -0.65947800   0.36730132
+    H  -1.12109306   0.55561188   0.42651873
+    """,
+    basis="6-31g",
+    spin=2,
+)
+mf = mol.ROKS(xc="SVWN").average_occ().run()
+
+print(f"SCF converged: {mf.converged}")
+print(f"Average-occupation SCF energy: {mf.e_avg_occ:.12f} Ha")
+print(f"High-spin energy: {mf.e_tot:.12f} Ha")

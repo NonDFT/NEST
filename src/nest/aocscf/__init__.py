@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # Copyright 2026 The NEST Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""nest package."""
+"""Average-occupation SCF with a high-spin reported energy.
 
-from nest import aocscf, nttda, sftda
+Importing this module registers ``average_occ()`` on molecular PySCF ROKS
+and SymAdaptedROKS objects.
+"""
 
-__version__ = "0.1.0"
+from .aocscf import AverageOccupationROKS, SymAdaptedAverageOccupationROKS, average_occ
 
-__all__ = ["__version__", "aocscf", "nttda", "sftda"]
+__all__ = ['AverageOccupationROKS', 'SymAdaptedAverageOccupationROKS', 'average_occ']
