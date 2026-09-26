@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Run noncollinear tensor TDA from a high-spin ROKS reference."""
+"""Run NTTDA from an average-occupation ROKS reference."""
 
 from pyscf import gto
 
-from nest import nttda
+from nest import aocscf, nttda  # noqa: F401 - registers ROKS.average_occ() and NTTDA()
 
 mol = gto.M(
     atom="""
@@ -28,14 +28,12 @@ mol = gto.M(
     """,
     basis="6-31g",
     spin=2,
-    symmetry=True,
+    symmetry=True
 )
-mf = mol.ROKS(xc="CAM-B3LYP").run()
-
-td = mf.NTTDA()
-td.deltaS = -1  # Final spin: Sf = Si + deltaS. Valid values are -1, 0, and +1.
-td.nobeta = False
-td.nstates = 5
+mf = mol.ROKS(xc="CAM-B3LYP").average_occ()
+mf.kernel()
+td = mf.NTTDA().set(nstates=5, deltaS=-1)
+# nobeta does not work for NTTDA with a average-occupation ROKS reference
 td.kernel()
 
 td.analyze(verbose=4)

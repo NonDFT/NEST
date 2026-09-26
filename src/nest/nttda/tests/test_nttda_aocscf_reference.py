@@ -1,17 +1,31 @@
 #!/usr/bin/env python
-"""Acceptance tests for Dz0SCF-based NTTDA energies."""
+# Copyright 2026 The NEST Developers. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Acceptance tests for AOCSCF-based NTTDA energies."""
 
 import unittest
 
 import numpy as np
 
-from pyscf import gto
+from pyscf import dft, gto, lib
 from pyscf.scf import hf
-from nest.dz0scf import DZ0SCF
+from nest import aocscf
 from nest.nttda import NTTDA
 
 
-class Dz0SCFReference(unittest.TestCase):
+class AOCSCFReference(unittest.TestCase):
     @staticmethod
     def lithium_hydride_cation():
         return gto.M(
@@ -24,7 +38,7 @@ class Dz0SCFReference(unittest.TestCase):
         )
 
     def make_reference(self, xc="SVWN"):
-        mf = DZ0SCF(self.lithium_hydride_cation(), xc=xc)
+        mf = self.lithium_hydride_cation().ROKS(xc=xc).average_occ()
         mf.conv_tol = 1e-12
         mf.conv_tol_grad = 1e-9
         mf.max_cycle = 100
@@ -41,9 +55,10 @@ class Dz0SCFReference(unittest.TestCase):
 
         mo = np.asarray(mf.mo_coeff)
         dm = (mo * np.asarray(mf.mo_occ)) @ mo.conj().T
-        dma, dmb = mf.make_rdm1s()
-        np.testing.assert_allclose(dma, dmb, atol=0, rtol=0)
-        np.testing.assert_allclose(dma + dmb, dm, atol=1e-14, rtol=0)
+        veff = mf.get_veff()
+        charge_veff = lib.view(mf, dft.rks.RKS).get_veff(dm=dm)
+        np.testing.assert_allclose(veff[0], veff[1], atol=0, rtol=0)
+        np.testing.assert_allclose(veff[0], charge_veff, atol=1e-12, rtol=0)
         self.assertAlmostEqual(
             np.einsum("ij,ji", dm, mf.get_ovlp()),
             mf.mol.nelectron,
@@ -83,14 +98,10 @@ class Dz0SCFReference(unittest.TestCase):
 
     def test_reference_energy_is_the_high_spin_roks_energy(self):
         mf = self.make_reference()
-        self.assertEqual(
-            mf.reference_energy_semantics,
-            "high_spin_roks_energy_on_dz0_orbitals",
-        )
-        self.assertFalse(mf.reference_energy_stationary)
-        self.assertAlmostEqual(
-            mf.reference_energy(), mf.high_spin_energy(), places=14,
-        )
+        high_spin = lib.view(mf, dft.roks.ROKS)
+        self.assertAlmostEqual(mf.e_tot, high_spin.energy_tot(), places=12)
+        self.assertAlmostEqual(mf.e_avg_occ, mf.energy_tot(), places=12)
+        self.assertGreater(abs(mf.e_tot - mf.e_avg_occ), 1e-5)
 
     def test_nttda_total_energies_use_the_reference_energy(self):
         mf = self.make_reference()
@@ -102,10 +113,10 @@ class Dz0SCFReference(unittest.TestCase):
             verbose=0,
         ).run()
 
-        self.assertAlmostEqual(tdobj.reference_energy(), mf.high_spin_energy())
+        self.assertAlmostEqual(tdobj.reference_energy(), mf.e_tot)
         np.testing.assert_allclose(
             tdobj.total_energies(),
-            mf.high_spin_energy() + tdobj.e,
+            tdobj.e_tot,
             atol=1e-13,
             rtol=0,
         )
@@ -132,7 +143,7 @@ class Dz0SCFReference(unittest.TestCase):
             unit="Bohr",
             verbose=0,
         )
-        mf = DZ0SCF(mol, xc="SVWN")
+        mf = mol.ROKS(xc="SVWN").average_occ()
         mf.conv_tol = 1e-12
         mf.max_cycle = 150
         mf.verbose = 0
@@ -157,6 +168,13 @@ class Dz0SCFReference(unittest.TestCase):
                 self.assertTrue(np.all(tdobj.converged))
                 np.testing.assert_allclose(
                     tdobj.e, reference, atol=2e-6, rtol=0,
+                )
+                # The independent explicit matrix must describe the same physical roots.
+                amplitudes = np.asarray([xy[0].ravel() for xy in tdobj.xy])
+                np.testing.assert_allclose(
+                    tdobj.get_ab() @ amplitudes.T,
+                    (tdobj.e[:, None] * amplitudes).T,
+                    atol=2e-7, rtol=0,
                 )
 
 

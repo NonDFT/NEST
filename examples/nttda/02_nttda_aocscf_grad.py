@@ -14,9 +14,9 @@
 # limitations under the License.
 
 '''
-NTTDA excited-state gradients on a Dz0SCF (average-occupation) reference.
+NTTDA excited-state gradients on an AOCSCF (average-occupation) reference.
 
-A Dz0SCF reference gives a common average-occupation orbital set for every
+An AOCSCF reference gives a common average-occupation orbital set for every
 spin channel.  NTTDA built on that reference can target the same-spin channel
 (``deltaS=0``) and the spin-lowering channel (``deltaS=-1``); the total state
 energy is the high-spin reference energy plus the NTTDA excitation energy, so
@@ -26,12 +26,11 @@ gradient.
 ``td.Gradients().kernel(state=n)`` returns the analytic gradient of
 ``E_reference + omega_n`` for state ``n`` (1 for the lowest root); ``state=0``
 returns the reference gradient.  Analytic gradients are available for
-``deltaS = -1`` and ``0``; ``deltaS = +1`` is not implemented.
+``deltaS = -1`` and ``0``; ``deltaS = +1`` uses ``method='finite_diff'``.
 '''
 
 from pyscf import gto
-from nest import dz0scf, nttda  # necessary imports
-from nest.dz0scf import DZ0SCF
+from nest import aocscf, nttda  # necessary imports
 
 atom = '''
 C    0.020000  -0.030000   0.010000
@@ -40,7 +39,7 @@ H    0.030000  -0.910000   0.500000
 '''
 mol = gto.M(atom=atom, charge=0, spin=2, basis='sto-3g', verbose=3)
 fun = 'B3LYP'
-mf = DZ0SCF(mol, xc=fun)
+mf = mol.ROKS(xc=fun).average_occ()
 mf.conv_tol = 1e-12
 mf.conv_tol_grad = 1e-9
 mf.max_cycle = 150

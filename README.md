@@ -21,7 +21,7 @@ It is built on top of the PySCF electronic structure package.
         │                          │                          │
         ▼                          ▼                          ▼
 Noncollinear TDDFT         Noncollinear SF-TDDFT      Noncollinear Tensor TDA
-                                   ├── Gradients            ├── Gradients (in progress)
+                                   ├── Gradients            ├── Gradients
                                    ├── Oscillator strengths └── SOC (in progress)
                                    ├── NADC
                                    └── SOC
@@ -50,8 +50,17 @@ Noncollinear TDDFT         Noncollinear SF-TDDFT      Noncollinear Tensor TDA
 
   NT-TDA is a spin-consistent extension of noncollinear TDDFT that provides a unified treatment of spin-conserving and spin-flip excitations. For an open-shell reference state with total spin S, it can describe target states with total spins S−1 (except for S = 1/2), S, and S+1. All resulting states are free from spin contamination.
 
-  - Analytic gradients *(in progress)*
+  - Analytic gradients for ΔS = −1 and 0 on ROKS and average-occupation ROKS (AOCSCF) references
+  - Finite-difference gradients for all three spin channels
   - SOC *(in progress)*
+
+  `td.Gradients().kernel(state=n)` returns the gradient of the selected total
+  energy (`state=1` is the lowest NTTDA root; `state=0` is the reference).
+  `td.Gradients().as_scanner(state=n)` provides the energy and gradient for geometry optimization.
+  Analytic DFT gradients omit numerical grid response; finite-difference checks
+  use fixed grids by default. Density fitting, X2C, solvent response, and NLC
+  are not supported by the NTTDA gradient driver.
+  See the [AOCSCF gradient example](examples/nttda/02_nttda_aocscf_grad.py).
 
 
 ## Authors

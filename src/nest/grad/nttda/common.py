@@ -1,3 +1,17 @@
+# Copyright 2026 The NEST Developers. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Shared orbital, reference-response and J/K derivative operations for NTTDA.
 
 Spin-channel coefficients and amplitude projections stay in the channel modules.
@@ -40,7 +54,7 @@ def assemble_gradient(
 
     # ROKS/HF includes Fz in the spin-resolved Fock probes. All other
     # references use charge-only probes and differentiate Fz separately.
-    spin_fock = xctype == "HF" and not getattr(mf, "is_average_occupation_reference", False)
+    spin_fock = xctype == "HF" and not nttda_mod._is_average_occupation_reference(mf)
     direct_fock_probes = (
         (0.5 * (p0 + pz), 0.5 * (p0 - pz)) if spin_fock
         else (0.5 * p0, 0.5 * p0)
@@ -140,10 +154,10 @@ def _fock_response_q(tdobj, p_alpha, p_beta):
     """Reference-density derivative of a spin-resolved Fock scalar."""
     mf = tdobj._scf
     mo = np.asarray(mf.mo_coeff)
-    if getattr(mf, "is_average_occupation_reference", False):
+    if nttda_mod._is_average_occupation_reference(mf):
         occupation = np.asarray(mf.mo_occ)
         probe = np.asarray(p_alpha) + np.asarray(p_beta)
-        potential = mf.gen_response(hermi=0)(probe.T)
+        potential = lib.view(mf, dft.rks.RKS).gen_response(hermi=0)(probe.T)
         q_total = (
             mo.conj().T @ (potential + potential.T) @ mo
         ) * occupation[None, :]
@@ -531,7 +545,7 @@ def spin_fock_direct(
                 xctype
             )
         if (nobeta_p0 is not None and tdobj.nobeta
-                and not getattr(mf, "is_average_occupation_reference", False)):
+                and not nttda_mod._is_average_occupation_reference(mf)):
             density0 = 0.5 * (density_alpha + density_beta)
             actual_probe_alpha = np.array(p_alpha, copy=True)
             actual_probe_beta = np.array(p_beta, copy=True)

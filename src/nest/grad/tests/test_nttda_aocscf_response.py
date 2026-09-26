@@ -1,5 +1,19 @@
 #!/usr/bin/env python
-"""Orbital-response checks for average-occupation Dz0SCF gradients."""
+# Copyright 2026 The NEST Developers. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Orbital-response checks for average-occupation AOCSCF gradients."""
 
 import unittest
 
@@ -7,7 +21,7 @@ import numpy as np
 from scipy.linalg import expm
 
 
-from pyscf import gto
+from pyscf import dft, gto, lib
 
 
 from nest.grad.nttda.ensemble import (  # noqa: E402
@@ -24,11 +38,11 @@ from nest.grad.nttda.delta_s_minus_one import (  # noqa: E402
     grad_elec as spin_lowering_grad_elec,
     spin_lowering_ledger_scalar,
 )
-from nest.dz0scf import DZ0SCF  # noqa: E402
+from nest import aocscf  # noqa: E402
 from nest.nttda import NTTDA  # noqa: E402
 
 
-class Dz0SCFOrbitalResponse(unittest.TestCase):
+class AOCSCFOrbitalResponse(unittest.TestCase):
     @staticmethod
     def make_reference():
         mol = gto.M(
@@ -39,7 +53,7 @@ class Dz0SCFOrbitalResponse(unittest.TestCase):
             unit="Bohr",
             verbose=0,
         )
-        mf = DZ0SCF(mol, xc="SVWN").set(
+        mf = mol.ROKS(xc="SVWN").average_occ().set(
             conv_tol=1e-13,
             conv_tol_grad=1e-10,
             max_cycle=100,
@@ -48,7 +62,7 @@ class Dz0SCFOrbitalResponse(unittest.TestCase):
         mf.grids.level = 0
         mf.kernel()
         if not mf.converged:
-            raise RuntimeError("Dz0SCF reference did not converge")
+            raise RuntimeError("AOCSCF reference did not converge")
         return mf
 
     @staticmethod
@@ -60,7 +74,7 @@ class Dz0SCFOrbitalResponse(unittest.TestCase):
             unit="Bohr",
             verbose=0,
         )
-        mf = DZ0SCF(mol, xc="SVWN").set(
+        mf = mol.ROKS(xc="SVWN").average_occ().set(
             conv_tol=1e-12,
             conv_tol_grad=1e-9,
             max_cycle=150,
@@ -69,7 +83,7 @@ class Dz0SCFOrbitalResponse(unittest.TestCase):
         mf.grids.level = 0
         mf.kernel()
         if not mf.converged:
-            raise RuntimeError("spin-one Dz0SCF reference did not converge")
+            raise RuntimeError("spin-one AOCSCF reference did not converge")
         return mf
 
     @staticmethod
@@ -87,7 +101,7 @@ class Dz0SCFOrbitalResponse(unittest.TestCase):
             unit="Bohr",
             verbose=0,
         )
-        mf = DZ0SCF(mol_a, xc="SVWN").set(
+        mf = mol_a.ROKS(xc="SVWN").average_occ().set(
             conv_tol=1e-12,
             conv_tol_grad=1e-9,
             max_cycle=100,
@@ -98,7 +112,7 @@ class Dz0SCFOrbitalResponse(unittest.TestCase):
         rng = np.random.default_rng(7)
         density = rng.standard_normal((mol_a.nao_nr(),) * 2)
         density = 0.5 * (density + density.T)
-        response_a = mf.gen_response(hermi=1)(density)
+        response_a = lib.view(mf, dft.rks.RKS).gen_response(hermi=1)(density)
 
         mol_b = gto.M(
             atom="Li 0 0 0; H 0 0 3.2",
@@ -111,9 +125,9 @@ class Dz0SCFOrbitalResponse(unittest.TestCase):
         mf.reset(mol_b)
         mf.grids.level = 0
         mf.kernel()
-        response_b = mf.gen_response(hermi=1)(density)
+        response_b = lib.view(mf, dft.rks.RKS).gen_response(hermi=1)(density)
 
-        fresh = DZ0SCF(mol_b, xc="SVWN").set(
+        fresh = mol_b.ROKS(xc="SVWN").average_occ().set(
             conv_tol=1e-12,
             conv_tol_grad=1e-9,
             max_cycle=100,
@@ -121,7 +135,7 @@ class Dz0SCFOrbitalResponse(unittest.TestCase):
         )
         fresh.grids.level = 0
         fresh.kernel()
-        response_fresh = fresh.gen_response(hermi=1)(density)
+        response_fresh = lib.view(fresh, dft.rks.RKS).gen_response(hermi=1)(density)
 
         np.testing.assert_allclose(
             response_b, response_fresh, atol=1e-8, rtol=0,

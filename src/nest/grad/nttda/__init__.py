@@ -1,11 +1,27 @@
+# Copyright 2026 The NEST Developers. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Analytic nuclear gradients for :mod:`nest.nttda`."""
 
 import numpy as np
 
-from pyscf import dft, lib
+from pyscf import dft, gto, lib
 from pyscf.grad import rhf as rhf_grad
+from pyscf.grad import tdrhf as tdrhf_grad
 from pyscf.lib import logger
 from nest.nttda import NTTDA
+from nest.nttda.nttda import _is_average_occupation_reference
 
 from . import delta_s_minus_one, delta_s_zero
 
@@ -26,8 +42,8 @@ def _copy_td_settings(source, target):
 
 
 def _displaced_reference(source, mol, fixed_grid):
-    if getattr(source, "is_average_occupation_reference", False):
-        reference = source.__class__(mol)
+    if _is_average_occupation_reference(source):
+        reference = dft.ROKS(mol).average_occ()
     elif isinstance(source, dft.KohnShamDFT):
         reference = dft.ROKS(mol)
     else:
@@ -51,8 +67,35 @@ def _displaced_reference(source, mol, fixed_grid):
     return reference
 
 
+class TDSCF_GradScanner(tdrhf_grad.TDSCF_GradScanner):
+    def __call__(self, mol_or_geom, state=None, **kwargs):
+        if state is not None:
+            self.state = state
+        if self.state != 0:
+            return super().__call__(mol_or_geom, state=self.state, **kwargs)
+        if isinstance(mol_or_geom, gto.MoleBase):
+            mol = mol_or_geom
+        else:
+            mol = self.mol.set_geom_(mol_or_geom, inplace=False)
+        self.reset(mol)
+        mf = self.base._scf
+        mf(mol)
+        return mf.e_tot, self.kernel(state=0, **kwargs)
+
+    @property
+    def converged(self):
+        mf_converged = self.base._scf.converged
+        if self.state == 0:
+            return mf_converged
+        return mf_converged and self.base.converged[self.state - 1]
+
+
 class Gradients(rhf_grad.GradientsBase):
-    """NTTDA gradients, including finite differences for Dz0SCF references."""
+    """NTTDA analytic and finite-difference gradients for ROKS and AOCSCF.
+
+    Analytic DFT derivatives omit grid response. ``fixed_grid`` controls only
+    the finite-difference grids; keep it true when checking analytic gradients.
+    """
 
     _keys = rhf_grad.GradientsBase._keys | {
         "state", "method", "step", "fixed_grid", "root_overlap_tol",
@@ -70,6 +113,16 @@ class Gradients(rhf_grad.GradientsBase):
         self.cphf_max_cycle = None
         self.nttda_details = None
 
+    def as_scanner(self, state=None):
+        """Return the selected state's total energy and nuclear gradient."""
+        if isinstance(self, lib.GradScanner):
+            if state is not None:
+                self.state = state
+            return self
+        name = self.__class__.__name__ + TDSCF_GradScanner.__name_mixin__
+        return lib.set_class(TDSCF_GradScanner(self, state),
+                             (TDSCF_GradScanner, self.__class__), name)
+
     def dump_flags(self, verbose=None):
         log = logger.new_logger(self, verbose)
         log.info("******** NTTDA nuclear gradients ********")
@@ -86,7 +139,11 @@ class Gradients(rhf_grad.GradientsBase):
         """Ground-state reference gradient, including nuclear repulsion."""
         if atmlst is not None:
             atmlst = list(atmlst)
-        return self.base._scf.nuc_grad_method().kernel(atmlst=atmlst)
+        reference_gradient = self.base._scf.nuc_grad_method()
+        if self.mol.symmetry:
+            de = reference_gradient.kernel()
+            return de if atmlst is None else de[atmlst]
+        return reference_gradient.kernel(atmlst=atmlst)
 
     def _analytic_components(self, xy, atmlst):
         tdobj = self.base
@@ -132,6 +189,8 @@ class Gradients(rhf_grad.GradientsBase):
             for xy in tdobj.xy
         ])
         root = int(np.argmax(overlaps))
+        if not tdobj.converged[root]:
+            raise RuntimeError("displaced NTTDA state did not converge")
         if overlaps[root] < self.root_overlap_tol:
             raise RuntimeError(
                 "NTTDA state tracking overlap %.6f is below %.6f" %
@@ -179,26 +238,40 @@ class Gradients(rhf_grad.GradientsBase):
         atmlst = tuple(atmlst)
 
         if self.state == 0:
-            return self.grad_nuc(atmlst=atmlst)
+            self.de = self.grad_nuc(atmlst=atmlst)
+            return self.de
         if self.base.xy is None:
             self.base.run()
         if not 1 <= self.state <= len(self.base.xy):
             raise ValueError("state must be in [1, %d]" % len(self.base.xy))
+        if not self.base._scf.converged or not self.base.converged[self.state - 1]:
+            raise RuntimeError("converge the SCF reference and selected NTTDA state before computing a gradient")
+        # The derivative integrals below use the conventional molecular AO Hamiltonian.
+        mf = self.base._scf
+        for attribute, label in (("with_df", "Density-fitted"),
+                                 ("with_x2c", "X2C"),
+                                 ("with_solvent", "Solvent-response")):
+            if getattr(mf, attribute, None) is not None:
+                raise NotImplementedError("%s NTTDA gradients are not implemented" % label)
+        if mf.do_nlc():
+            raise NotImplementedError("NLC NTTDA gradients are not implemented")
         if self.verbose >= logger.INFO:
             self.dump_flags()
 
+        # Symmetrize the full gradient before selecting atoms.
+        calculation_atoms = tuple(range(self.mol.natm)) if self.mol.symmetry else atmlst
         if self.method == "analytic":
             excitation = self.grad_elec(
-                self.base.xy[self.state - 1], atmlst=atmlst,
+                self.base.xy[self.state - 1], atmlst=calculation_atoms,
             )
-            result = self.grad_nuc(atmlst=atmlst) + excitation
+            result = self.grad_nuc(atmlst=calculation_atoms) + excitation
         elif self.method == "finite_diff":
-            result = self._finite_difference(atmlst)
+            result = self._finite_difference(calculation_atoms)
         else:
             raise ValueError("unknown NTTDA gradient method %s" % self.method)
         self.de = result
         if self.mol.symmetry:
-            self.de = self.symmetrize(self.de, atmlst)
+            self.de = self.symmetrize(self.de)[list(atmlst)]
         self._finalize()
         return self.de
 

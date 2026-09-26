@@ -1,4 +1,18 @@
 #!/usr/bin/env python
+# Copyright 2026 The NEST Developers. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Layered M-matrix and frozen-orbital checks for NTTDA gradients."""
 
 import unittest
@@ -68,15 +82,19 @@ def exact_state_two(mf, delta_s, nobeta):
     rows = np.asarray(vind(np.eye(size))).reshape(size, size)
     if np.max(np.abs(rows - rows.T)) >= 1e-10:
         raise AssertionError("NTTDA action is not symmetric")
-    energies, vectors = np.linalg.eigh(0.5 * (rows + rows.T))
-    if delta_s == -1:
-        vectors = vectors[:, np.abs(energies) > 1e-8]
-    vector = vectors[:, 1]
+    matrix = 0.5 * (rows + rows.T)
     if delta_s == -1:
         nc = np.count_nonzero(mf.mo_occ == 2)
         no = np.count_nonzero(mf.mo_occ == 1)
         nv = np.count_nonzero(mf.mo_occ == 0)
-        vector = vector.reshape(nc + no, no + nv)
+        redundant = np.zeros((nc + no, no + nv))
+        redundant[nc:, :no] = np.eye(no) / np.sqrt(no)
+        physical = np.linalg.qr(redundant.reshape(-1, 1), mode="complete")[0][:, 1:]
+        _energies, vectors = np.linalg.eigh(physical.T @ matrix @ physical)
+        vector = (physical @ vectors[:, 1]).reshape(nc + no, no + nv)
+    else:
+        _energies, vectors = np.linalg.eigh(matrix)
+        vector = vectors[:, 1]
     return tdobj, (vector, 0)
 
 

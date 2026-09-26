@@ -1,16 +1,30 @@
 #!/usr/bin/env python
-"""Finite-difference NTTDA gradients on a Dz0SCF reference."""
+# Copyright 2026 The NEST Developers. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Finite-difference NTTDA gradients on an AOCSCF reference."""
 
 import unittest
 
 import numpy as np
 
 from pyscf import gto
-from nest.dz0scf import DZ0SCF
+from nest import aocscf
 from nest.nttda import NTTDA
 
 
-class Dz0SCFFiniteDifferenceGradient(unittest.TestCase):
+class AOCSCFFiniteDifferenceGradient(unittest.TestCase):
     @staticmethod
     def make_td():
         mol = gto.M(
@@ -21,7 +35,7 @@ class Dz0SCFFiniteDifferenceGradient(unittest.TestCase):
             unit="Bohr",
             verbose=0,
         )
-        mf = DZ0SCF(mol, xc="SVWN").set(
+        mf = mol.ROKS(xc="SVWN").average_occ().set(
             conv_tol=1e-12,
             conv_tol_grad=1e-9,
             max_cycle=100,
@@ -30,7 +44,7 @@ class Dz0SCFFiniteDifferenceGradient(unittest.TestCase):
         mf.grids.level = 0
         mf.kernel()
         if not mf.converged:
-            raise RuntimeError("Dz0SCF test reference did not converge")
+            raise RuntimeError("AOCSCF test reference did not converge")
         tdobj = NTTDA(mf).set(
             deltaS=0,
             nstates=2,
@@ -51,8 +65,7 @@ class Dz0SCFFiniteDifferenceGradient(unittest.TestCase):
         from nest.grad.nttda import _displaced_reference
 
         displaced = _displaced_reference(tdobj._scf, tdobj.mol.copy(), False)
-        self.assertTrue(
-            getattr(displaced, "is_average_occupation_reference", False))
+        self.assertIsInstance(displaced, type(tdobj._scf))
         result = gradient.kernel(
             state=2,
             method="finite_diff",
@@ -90,7 +103,7 @@ class Dz0SCFFiniteDifferenceGradient(unittest.TestCase):
             unit="Bohr",
             verbose=0,
         )
-        mf = DZ0SCF(mol, xc="SVWN").set(
+        mf = mol.ROKS(xc="SVWN").average_occ().set(
             conv_tol=1e-11,
             max_cycle=150,
             verbose=0,
@@ -128,7 +141,7 @@ class Dz0SCFFiniteDifferenceGradient(unittest.TestCase):
             unit="Bohr",
             verbose=0,
         )
-        mf = DZ0SCF(mol, xc="SVWN").set(
+        mf = mol.ROKS(xc="SVWN").average_occ().set(
             conv_tol=1e-12,
             conv_tol_grad=1e-9,
             max_cycle=150,
@@ -178,7 +191,7 @@ class Dz0SCFFiniteDifferenceGradient(unittest.TestCase):
                     unit="Bohr",
                     verbose=0,
                 )
-                mf = DZ0SCF(mol, xc=xc).set(
+                mf = mol.ROKS(xc=xc).average_occ().set(
                     conv_tol=1e-12,
                     conv_tol_grad=1e-9,
                     max_cycle=150,

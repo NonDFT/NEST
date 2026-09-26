@@ -1,3 +1,17 @@
+# Copyright 2026 The NEST Developers. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """LDA, GGA, and meta-GGA quadrature for NTTDA gradients.
 
 This module is channel-neutral: callers provide orbital spaces, transition
@@ -12,6 +26,7 @@ from pyscf import lib
 from pyscf.dft.gen_grid import NBINS
 from pyscf.dft.numint import _dot_ao_ao_sparse, _scale_ao_sparse
 from pyscf.grad import tdrks as tdrks_grad
+from nest.nttda.nttda import _is_average_occupation_reference
 
 
 # Shared result and projection helpers
@@ -312,9 +327,10 @@ def _project_channel_potentials(tdobj, potentials, blocks):
 def _reference_spin_densities(tdobj):
     """Spin densities of the variational reference used by the XC kernel."""
     mf = tdobj._scf
-    if getattr(mf, "is_average_occupation_reference", False):
-        return tuple(np.asarray(dm) for dm in mf.make_rdm1s())
     mo = np.asarray(mf.mo_coeff)
+    if _is_average_occupation_reference(mf):
+        density = (mo * mf.mo_occ) @ mo.conj().T
+        return 0.5 * density, 0.5 * density
     return (
         mo[:, mf.mo_occ > 0] @ mo[:, mf.mo_occ > 0].T,
         mo[:, mf.mo_occ == 2] @ mo[:, mf.mo_occ == 2].T,
@@ -325,7 +341,7 @@ def _reference_spin_occupations(tdobj):
     """Per-orbital alpha/beta occupations of the reference density."""
     mf = tdobj._scf
     occupation = np.asarray(mf.mo_occ)
-    if getattr(mf, "is_average_occupation_reference", False):
+    if _is_average_occupation_reference(mf):
         return 0.5 * occupation, 0.5 * occupation
     return (occupation > 0).astype(float), (occupation == 2).astype(float)
 
@@ -902,7 +918,7 @@ def nobeta_reference_q(tdobj, p0, max_memory=None):
     mo = np.asarray(mf.mo_coeff)
     q_alpha = np.zeros((mo.shape[1], mo.shape[1]))
     q_beta = np.zeros_like(q_alpha)
-    if not tdobj.nobeta or getattr(mf, "is_average_occupation_reference", False):
+    if not tdobj.nobeta or _is_average_occupation_reference(mf):
         return q_alpha, q_beta
     if max_memory is None:
         max_memory = tdobj.max_memory

@@ -14,13 +14,13 @@
 # limitations under the License.
 
 '''
-Analytic nuclear gradient of the Dz0SCF (average-occupation) reference.
+Analytic nuclear gradient of the AOCSCF (average-occupation) reference.
 
-Dz0SCF drives one set of orbitals with average occupations 2/1/0 for a
+AOCSCF drives one set of orbitals with average occupations 2/1/0 for a
 high-spin open-shell reference, and takes the high-spin ROKS energy evaluated
 on those orbitals as the reference energy.  ``nuc_grad_method()`` returns the
 analytic gradient of that reference energy, which is the zero state used by
-the NTTDA excited-state gradients (see examples/nttda/02_nttda_dz0scf_grad.py).
+the NTTDA excited-state gradients (see examples/nttda/02_nttda_aocscf_grad.py).
 
 The reference is non-stationary on the average-occupation orbitals, so the
 driver solves a Z-vector equation for the orbital response; a diffuse enough
@@ -28,8 +28,7 @@ integration grid is required for the force sum to vanish.
 '''
 
 from pyscf import gto
-from nest import dz0scf  # necessary import
-from nest.dz0scf import DZ0SCF
+from nest import aocscf  # necessary import
 
 atom = '''
 N   0.000000  -0.040000   0.000000
@@ -38,7 +37,7 @@ H   0.000000  -0.860000   0.520000
 '''
 mol = gto.M(atom=atom, charge=0, spin=1, basis='6-31g', verbose=3)
 fun = 'PBE'  # try also 'SVWN', 'B3LYP', 'M06-2X', etc.
-mf = DZ0SCF(mol, xc=fun)
+mf = mol.ROKS(xc=fun).average_occ()
 mf.conv_tol = 1e-12
 mf.conv_tol_grad = 1e-9
 mf.max_cycle = 120
@@ -47,7 +46,7 @@ mf.grids.prune = None
 mf.small_rho_cutoff = 0.0
 mf.kernel()
 
-print('Dz0SCF reference energy: %.12f' % mf.high_spin_energy())
+print('AOCSCF reference energy: %.12f' % mf.e_tot)
 
 grad = mf.nuc_grad_method().kernel()
 print('Analytic reference gradient (Eh/Bohr):\n', grad)

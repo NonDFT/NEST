@@ -12,26 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: CI
+"""Average-occupation SCF with a high-spin reported energy.
 
-on:
-  push:
-  pull_request:
+Importing this module registers ``average_occ()`` on molecular PySCF ROKS
+and SymAdaptedROKS objects.
+"""
 
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    env:
-      OMP_NUM_THREADS: 2
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-      - run: python -m pip install -e ".[dev]"
-      - name: Check dispersion and optimization dependencies
-        run: python -c "from pyscf.dispersion import dftd3, dftd4; import geometric"
-      - run: python -m ruff check .
-      - run: python -m pytest src -q
+from .aocscf import AverageOccupationROKS, SymAdaptedAverageOccupationROKS, average_occ
+
+__all__ = ['AverageOccupationROKS', 'SymAdaptedAverageOccupationROKS', 'average_occ']
