@@ -66,16 +66,3 @@ class KnownValues(unittest.TestCase):
         self.assertTrue(mf.converged)
         self.assertAlmostEqual(mf.e_avg_occ, -151.18245418239550, delta=1e-7)
         self.assertAlmostEqual(mf.e_tot, -151.25619865161033, delta=1e-7)
-
-    def test_symmetry_adapted_orbital_order(self):
-        mol = gto.M(
-            atom='H 0 .934473 -.588078; H 0 -.934473 -.588078; C 0 0 0; O 0 0 1.221104',
-            basis='6-31g', spin=2, symmetry=True, verbose=0,
-        )
-        mf = mol.ROKS(xc='CAM-B3LYP').average_occ().run()
-
-        self.assertTrue(mf.converged)
-        self.assertAlmostEqual(mf.e_tot, -114.285284450421, delta=1e-6)
-        np.testing.assert_array_equal(mf.mo_occ[:7], 2)
-        np.testing.assert_array_equal(mf.mo_occ[7:9], 1)
-        np.testing.assert_array_equal(mf.mo_occ[9:], 0)

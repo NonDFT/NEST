@@ -93,6 +93,7 @@ class AverageOccupationROKS(dft.roks.ROKS):
 
     get_veff = get_veff
     nuc_grad_method = nuc_grad_method
+    Gradients = nuc_grad_method
     dump_flags = dump_flags
     check_sanity = check_sanity
 
@@ -110,6 +111,7 @@ class SymAdaptedAverageOccupationROKS(dft.rks_symm.SymAdaptedROKS):
 
     get_veff = get_veff
     nuc_grad_method = nuc_grad_method
+    Gradients = nuc_grad_method
     dump_flags = dump_flags
     check_sanity = check_sanity
 
