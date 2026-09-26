@@ -58,7 +58,7 @@ for delta_s in (-1, 0):
     ).run()
     print('deltaS = %+d' % delta_s)
     print('  NTTDA excitation energies:', td.e)
-    print('  total energies (E_ref + omega):', td.total_energies())
+    print('  total energies (E_ref + omega):', td.e_tot)
 
     grad = td.Gradients().kernel(state=1)
     print('  state-1 analytic gradient (Eh/Bohr):\n', grad)

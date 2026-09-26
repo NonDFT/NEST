@@ -24,7 +24,6 @@ from dataclasses import dataclass
 import numpy as np
 
 from pyscf import lib
-from nest.nttda import nttda as nttda_mod
 from nest.nttda.nttda import gen_rohf_response_sc
 
 from .common import (
@@ -137,7 +136,13 @@ def fock0_fockz(tdobj, max_memory=None):
         hermi=0,
         max_memory=max_memory,
     )
-    fock0 = nttda_mod._reference_fock0(mf, tdobj.nobeta)
+    if tdobj.nobeta:
+        dma, dmb = mf.make_rdm1()
+        dm0 = 0.5 * (dma + dmb)
+        fock = mf.get_fock(dm=np.array([dm0, dm0]))
+    else:
+        fock = mf.get_fock()
+    fock0 = 0.5 * (fock.focka + fock.fockb)
     return fock0, fockz
 
 

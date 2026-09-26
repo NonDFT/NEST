@@ -23,6 +23,7 @@ import numpy as np
 from pyscf import dft, lib
 from pyscf.grad import rhf as rhf_grad
 from nest.nttda import nttda as nttda_mod
+from nest.aocscf import AverageOccupationROKS, SymAdaptedAverageOccupationROKS
 
 from . import xc as xc_backend
 from .xc import _reference_spin_densities
@@ -54,7 +55,7 @@ def assemble_gradient(
 
     # ROKS/HF includes Fz in the spin-resolved Fock probes. All other
     # references use charge-only probes and differentiate Fz separately.
-    spin_fock = xctype == "HF" and not nttda_mod._is_average_occupation_reference(mf)
+    spin_fock = xctype == "HF" and not isinstance(mf, (AverageOccupationROKS, SymAdaptedAverageOccupationROKS))
     direct_fock_probes = (
         (0.5 * (p0 + pz), 0.5 * (p0 - pz)) if spin_fock
         else (0.5 * p0, 0.5 * p0)
@@ -154,7 +155,7 @@ def _fock_response_q(tdobj, p_alpha, p_beta):
     """Reference-density derivative of a spin-resolved Fock scalar."""
     mf = tdobj._scf
     mo = np.asarray(mf.mo_coeff)
-    if nttda_mod._is_average_occupation_reference(mf):
+    if isinstance(mf, (AverageOccupationROKS, SymAdaptedAverageOccupationROKS)):
         occupation = np.asarray(mf.mo_occ)
         probe = np.asarray(p_alpha) + np.asarray(p_beta)
         potential = lib.view(mf, dft.rks.RKS).gen_response(hermi=0)(probe.T)
@@ -545,7 +546,7 @@ def spin_fock_direct(
                 xctype
             )
         if (nobeta_p0 is not None and tdobj.nobeta
-                and not nttda_mod._is_average_occupation_reference(mf)):
+                and not isinstance(mf, (AverageOccupationROKS, SymAdaptedAverageOccupationROKS))):
             density0 = 0.5 * (density_alpha + density_beta)
             actual_probe_alpha = np.array(p_alpha, copy=True)
             actual_probe_beta = np.array(p_beta, copy=True)

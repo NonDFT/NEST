@@ -20,7 +20,7 @@ import numpy as np
 
 from pyscf import dft, lib
 from pyscf.grad import rhf as rhf_grad
-from nest.nttda.nttda import _is_average_occupation_reference
+from nest.aocscf import AverageOccupationROKS, SymAdaptedAverageOccupationROKS
 
 
 
@@ -44,7 +44,7 @@ def finish_gradient(
     ``direct_fock_probes`` enables one batched Fock-derivative evaluation: its
     contraction is the first result and the Z-vector contraction is the second.
     """
-    if _is_average_occupation_reference(tdobj._scf):
+    if isinstance(tdobj._scf, (AverageOccupationROKS, SymAdaptedAverageOccupationROKS)):
         from . import ensemble as response
     else:
         from . import roks as response

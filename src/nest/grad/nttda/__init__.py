@@ -21,7 +21,7 @@ from pyscf.grad import rhf as rhf_grad
 from pyscf.grad import tdrhf as tdrhf_grad
 from pyscf.lib import logger
 from nest.nttda import NTTDA
-from nest.nttda.nttda import _is_average_occupation_reference
+from nest.aocscf import AverageOccupationROKS, SymAdaptedAverageOccupationROKS
 
 from . import delta_s_minus_one, delta_s_zero
 
@@ -42,7 +42,7 @@ def _copy_td_settings(source, target):
 
 
 def _displaced_reference(source, mol, fixed_grid):
-    if _is_average_occupation_reference(source):
+    if isinstance(source, (AverageOccupationROKS, SymAdaptedAverageOccupationROKS)):
         reference = dft.ROKS(mol).average_occ()
     elif isinstance(source, dft.KohnShamDFT):
         reference = dft.ROKS(mol)
@@ -196,7 +196,7 @@ class Gradients(rhf_grad.GradientsBase):
                 "NTTDA state tracking overlap %.6f is below %.6f" %
                 (overlaps[root], self.root_overlap_tol)
             )
-        return float(tdobj.total_energies()[root])
+        return float(tdobj.e_tot[root])
 
     def _finite_difference(self, atmlst):
         coords0 = self.mol.atom_coords()

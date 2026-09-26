@@ -26,7 +26,7 @@ from pyscf import lib
 from pyscf.dft.gen_grid import NBINS
 from pyscf.dft.numint import _dot_ao_ao_sparse, _scale_ao_sparse
 from pyscf.grad import tdrks as tdrks_grad
-from nest.nttda.nttda import _is_average_occupation_reference
+from nest.aocscf import AverageOccupationROKS, SymAdaptedAverageOccupationROKS
 
 
 # Shared result and projection helpers
@@ -328,7 +328,7 @@ def _reference_spin_densities(tdobj):
     """Spin densities of the variational reference used by the XC kernel."""
     mf = tdobj._scf
     mo = np.asarray(mf.mo_coeff)
-    if _is_average_occupation_reference(mf):
+    if isinstance(mf, (AverageOccupationROKS, SymAdaptedAverageOccupationROKS)):
         density = (mo * mf.mo_occ) @ mo.conj().T
         return 0.5 * density, 0.5 * density
     return (
@@ -341,7 +341,7 @@ def _reference_spin_occupations(tdobj):
     """Per-orbital alpha/beta occupations of the reference density."""
     mf = tdobj._scf
     occupation = np.asarray(mf.mo_occ)
-    if _is_average_occupation_reference(mf):
+    if isinstance(mf, (AverageOccupationROKS, SymAdaptedAverageOccupationROKS)):
         return 0.5 * occupation, 0.5 * occupation
     return (occupation > 0).astype(float), (occupation == 2).astype(float)
 
@@ -918,7 +918,7 @@ def nobeta_reference_q(tdobj, p0, max_memory=None):
     mo = np.asarray(mf.mo_coeff)
     q_alpha = np.zeros((mo.shape[1], mo.shape[1]))
     q_beta = np.zeros_like(q_alpha)
-    if not tdobj.nobeta or _is_average_occupation_reference(mf):
+    if not tdobj.nobeta or isinstance(mf, (AverageOccupationROKS, SymAdaptedAverageOccupationROKS)):
         return q_alpha, q_beta
     if max_memory is None:
         max_memory = tdobj.max_memory

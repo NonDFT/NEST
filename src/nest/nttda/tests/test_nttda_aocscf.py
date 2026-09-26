@@ -160,25 +160,6 @@ class AOCSCFReference(unittest.TestCase):
         self.assertAlmostEqual(mf.e_tot, high_spin.energy_tot(), places=12)
         self.assertAlmostEqual(mf.e_avg_occ, mf.energy_tot(), places=12)
 
-    def test_nttda_total_energies_use_the_reference_energy(self):
-        mf = self.make_reference()
-        tdobj = NTTDA(mf).set(
-            deltaS=0,
-            nstates=2,
-            conv_tol=1e-8,
-            lindep=1e-18,
-            max_cycle=200,
-            verbose=0,
-        ).run()
-
-        self.assertAlmostEqual(tdobj.reference_energy(), mf.e_tot)
-        np.testing.assert_allclose(
-            tdobj.total_energies(),
-            mf.e_tot + tdobj.e,
-            atol=1e-13,
-            rtol=0,
-        )
-
     def test_nttda_supports_common_functional_families(self):
         for xc in ("HF", "PBE", "TPSS", "M06-2X", "CAM-B3LYP"):
             with self.subTest(xc=xc):

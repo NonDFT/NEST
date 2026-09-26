@@ -231,10 +231,6 @@ class KnownValues(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'deltaS must be'):
             td.kernel()
         td.deltaS = -1
-        with self.assertRaisesRegex(ValueError, 'nstates must be a positive integer'):
-            td.kernel(nstates=0)
-        with self.assertRaisesRegex(ValueError, 'nstates must be a positive integer'):
-            td.kernel(nstates=1.5)
 
         mol = gto.M(atom='H 0 0 0', spin=1, basis='sto-3g', verbose=0)
         td = mol.ROKS(xc='HF').run().NTTDA()

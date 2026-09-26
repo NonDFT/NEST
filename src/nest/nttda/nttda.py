@@ -30,41 +30,10 @@ from pyscf.dft.numint import _scale_ao_sparse, _dot_ao_ao_sparse, _dot_ao_dm_spa
 from nest._lr_eig import eigh as lr_eigh
 from pyscf import symm
 from pyscf.data import nist
-from nest.aocscf import AverageOccupationROKS, SymAdaptedAverageOccupationROKS
 
 MO_BASE = getattr(__config__, 'MO_BASE', 1)
 MO_GRID_FXC1 = True
 
-
-def _is_average_occupation_reference(mf):
-    return isinstance(mf, (AverageOccupationROKS, SymAdaptedAverageOccupationROKS))
-
-
-def _require_nttda_reference(mf):
-    supported = (
-        dft.roks.ROKS,
-        dft.rks_symm.SymAdaptedROKS,
-    )
-    if not isinstance(mf, supported):
-        raise TypeError("NTTDA response requires a ROKS or AOCSCF reference")
-
-
-def _reference_fock0(mf, nobeta):
-    """Return the common Fock used by the NTTDA orbital terms.
-
-    An AOCSCF (average-occupation) reference is self-consistent in
-    ``F0[D/2,D/2]``.  For ROKS, retain the two historical choices controlled
-    by ``nobeta``.
-    """
-    if _is_average_occupation_reference(mf):
-        return np.asarray(mf.get_fock())
-    if nobeta:
-        dma, dmb = mf.make_rdm1()
-        dm0 = 0.5 * (dma + dmb)
-        fock = mf.get_fock(dm=np.array([dm0, dm0]))
-    else:
-        fock = mf.get_fock()
-    return 0.5 * (fock.focka + fock.fockb)
 
 def _fxc1_gga_mo_wv(fxc, t, i):
     nvec = t.shape[0]
@@ -326,7 +295,6 @@ def gen_rohf_response_sfu(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=No
     mol = mf.mol
     if log is None:
         log = logger.new_logger(mf)
-    _require_nttda_reference(mf)
 
     ni = mf._numint
     ni.libxc.test_deriv_order(mf.xc, 2, raise_error=True)
@@ -387,7 +355,6 @@ def gen_rohf_response_sc(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=Non
     mol = mf.mol
     if log is None:
         log = logger.new_logger(mf)
-    _require_nttda_reference(mf)
 
     s = (mol.nelec[0] - mol.nelec[1]) * 0.5
 
@@ -497,7 +464,6 @@ def gen_rohf_response_sfd(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=No
     mol = mf.mol
     if log is None:
         log = logger.new_logger(mf)
-    _require_nttda_reference(mf)
 
     s = (mol.nelec[0] - mol.nelec[1]) * 0.5
 
@@ -611,7 +577,13 @@ def gen_vind_sfu(td):
     vresp, fockz = gen_rohf_response_sfu(mf, mo_coeff=mo_coeff, mo_occ=mo_occ, hermi=0,
                                          max_memory=td.max_memory, log=log)
 
-    fock0 = _reference_fock0(mf, td.nobeta)
+    if td.nobeta:
+        dma, dmb = mf.make_rdm1()
+        dm0 = 0.5 * (dma + dmb)
+        fock = mf.get_fock(dm=np.array([dm0, dm0]))
+    else:
+        fock = mf.get_fock()
+    fock0 = 0.5 * (fock.focka + fock.fockb)
     focka = fock0 + fockz
     fockb = fock0 - fockz
 
@@ -674,7 +646,13 @@ def gen_vind_sc(td):
                                         fxc_ref=fxc_ref,
                                         skip_xc_vref1=use_mo_grid_fxc1)
 
-    fock0 = _reference_fock0(mf, td.nobeta)
+    if td.nobeta:
+        dma, dmb = mf.make_rdm1()
+        dm0 = 0.5 * (dma + dmb)
+        fock = mf.get_fock(dm=np.array([dm0, dm0]))
+    else:
+        fock = mf.get_fock()
+    fock0 = 0.5 * (fock.focka + fock.fockb)
     focka = fock0 + fockz
     fockb = fock0 - fockz
 
@@ -842,7 +820,13 @@ def gen_vind_sfd(td):
                                          fxc_ref=fxc_ref,
                                          skip_xc_vref1=use_mo_grid_fxc1)
 
-    fock0 = _reference_fock0(mf, td.nobeta)
+    if td.nobeta:
+        dma, dmb = mf.make_rdm1()
+        dm0 = 0.5 * (dma + dmb)
+        fock = mf.get_fock(dm=np.array([dm0, dm0]))
+    else:
+        fock = mf.get_fock()
+    fock0 = 0.5 * (fock.focka + fock.fockb)
 
     fock_coco0 = orbos.T @ (fock0 - fockz) @ orbos
     fock_coco1 = orbcs.T @ (fock0 + fockz) @ orbcs
@@ -984,16 +968,6 @@ class NTTDA(TDBase):
 
     _keys = {'deltaS', 'nobeta'}
 
-    def reference_energy(self):
-        """Return the reported reference energy, including AOCSCF's high-spin energy."""
-        return float(self._scf.e_tot)
-
-    def total_energies(self):
-        """Return ``E_reference + omega`` for the converged NTTDA roots."""
-        if self.e is None:
-            raise RuntimeError('run NTTDA.kernel() before requesting total energies')
-        return self.reference_energy() + np.asarray(self.e)
-
     def nuc_grad_method(self):
         """Return the independent NTTDA nuclear-gradient driver."""
         from nest.grad.nttda import Gradients
@@ -1016,8 +990,6 @@ class NTTDA(TDBase):
     def check_sanity(self):
         if self.deltaS not in (-1, 0, 1):
             raise ValueError('deltaS must be -1, 0, or 1')
-        if not isinstance(self.nstates, (int, np.integer)) or self.nstates <= 0:
-            raise ValueError('nstates must be a positive integer')
         TDBase.check_sanity(self)
         return self
 
