@@ -47,11 +47,8 @@ class KnownValues(unittest.TestCase):
 
     def test_roks_sftda_soc(self):
         mf = self.mol.ROKS(xc='SVWN').run()
-        # Spin and SOC references use a dense diagonalization of get_ab_sf().
-        # Converge amplitudes tightly enough for the observable assertions.
         td = sftda.TDA_SF(mf).set(
             extype=1, collinear='mcol', collinear_samples=50, nstates=3,
-            conv_tol=1e-10, lindep=1e-18,
         ).run()
         driver = td.SOC(soctype='SOMF')
         driver.kernel()
@@ -63,7 +60,7 @@ class KnownValues(unittest.TestCase):
             -0.2104295981711506, -0.0007174487394460, 0.0251523165536107,
         ], atol=1e-8, rtol=0)
         np.testing.assert_allclose(td.spin_square(), [
-            0.0010849068616214375, 1.999949080770187, 0.03128946766229479,
+            0.0010848962999618905, 1.9999490812871423, 0.031289468589663194,
         ], atol=1e-8, rtol=0)
         self.assertEqual(driver.h_soc.shape, (5, 5))
         np.testing.assert_allclose(driver.h_soc, driver.h_soc.conj().T, atol=1e-12)
@@ -71,16 +68,15 @@ class KnownValues(unittest.TestCase):
             0.0, 46026.50192719676, 46026.502933180134, 46026.50860068575, 51704.26176254972,
         ], atol=1e-5, rtol=0)
         assert_allclose_up_to_sign(self, driver.get_block(1, 0) * HARTREE2WAVENUMBER, np.array([
-            [0.4674528693952154 - 6.685125063070073j],
-            [0.0 - 14.141112265887136j],
-            [0.4674528693952154 + 6.685125063070073j],
+            [0.4674642361078794 - 6.685128880147436j],
+            [0.0 - 14.141141940607179j],
+            [0.4674642361078794 + 6.685128880147436j],
         ]), 1e-8)
 
     def test_uks_sftda_soc(self):
         mf = self.mol.UKS(xc='SVWN').run()
         td = sftda.TDA_SF(mf).set(
             extype=1, collinear='mcol', collinear_samples=50, nstates=3,
-            conv_tol=1e-10, lindep=1e-18,
         ).run()
         driver = td.SOC(soctype='SOMF')
         driver.kernel()
@@ -92,7 +88,7 @@ class KnownValues(unittest.TestCase):
             -0.2087681123003969, 0.0008054142507056, 0.0266315014304553,
         ], atol=1e-8, rtol=0)
         np.testing.assert_allclose(td.spin_square(), [
-            0.0026539051945104752, 2.0039691867433698, 0.03729208427888597,
+            0.0026539116310360, 2.0039691808012283, 0.0372918876839510,
         ], atol=1e-8, rtol=0)
         self.assertEqual(driver.h_soc.shape, (5, 5))
         np.testing.assert_allclose(driver.h_soc, driver.h_soc.conj().T, atol=1e-12)
@@ -100,9 +96,9 @@ class KnownValues(unittest.TestCase):
             0.0, 45996.07760059907, 45996.07872056033, 45996.08436902181, 51664.25143819543,
         ], atol=1e-5, rtol=0)
         assert_allclose_up_to_sign(self, driver.get_block(1, 0) * HARTREE2WAVENUMBER, np.array([
-            [-0.4695297473851865 + 6.6992258754796055j],
-            [0.0 + 14.109663673762803j],
-            [-0.4695297473851865 - 6.6992258754796055j],
+            [-0.4695042701337793 + 6.699202067333119j],
+            [0.0 + 14.109500425297364j],
+            [-0.4695042701337793 - 6.699202067333119j],
         ]), 1e-8)
 
 

@@ -49,6 +49,7 @@ class AOCSCFFiniteDifferenceGradient(unittest.TestCase):
             deltaS=0,
             nstates=2,
             conv_tol=1e-8,
+            lindep=1e-18,
             max_cycle=100,
             verbose=0,
         ).run()
@@ -205,6 +206,7 @@ class AOCSCFFiniteDifferenceGradient(unittest.TestCase):
                     nobeta=nobeta,
                     nstates=2,
                     conv_tol=1e-9,
+                    lindep=1e-20,
                     max_cycle=200,
                     verbose=0,
                 ).run()
