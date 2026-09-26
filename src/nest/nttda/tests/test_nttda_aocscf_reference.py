@@ -93,6 +93,13 @@ class AOCSCFReference(unittest.TestCase):
             ).run()
             self.assertTrue(np.all(tdobj.converged))
             self.assertTrue(np.all(np.isfinite(tdobj.e)))
+            matrix = tdobj.get_ab()
+            vectors = np.asarray([xy[0].ravel() for xy in tdobj.xy])
+            residuals = np.linalg.norm(matrix @ vectors.T - vectors.T * tdobj.e, axis=0)
+            self.assertLess(np.max(residuals), tdobj.conv_tol)
+            np.testing.assert_allclose(
+                tdobj.e, np.linalg.eigvalsh(matrix)[:2], atol=1e-10, rtol=0,
+            )
             energies.append(tdobj.e)
         np.testing.assert_allclose(energies[0], energies[1], atol=1e-12, rtol=0)
 
@@ -162,6 +169,7 @@ class AOCSCFReference(unittest.TestCase):
                     deltaS=delta_s,
                     nstates=2,
                     conv_tol=1e-7,
+                    lindep=1e-18,
                     max_cycle=200,
                     verbose=0,
                 ).run()

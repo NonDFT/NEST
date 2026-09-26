@@ -189,7 +189,7 @@ def eigh(aop, x0, precond, tol_residual=1e-5, lindep=1e-12, nroots=1,
         space_inc = nroots
     else:
         # Adding too many trial bases in each iteration may cause larger errors
-        space_inc = min(nroots, min(MAX_SPACE_INC, x0_size//2))
+        space_inc = max(nroots, min(MAX_SPACE_INC, x0_size//2))
 
     max_space = int(max_memory*1e6/8/x0_size / 2 - nroots - space_inc)
     if max_space < nroots * 4 < x0_size:
