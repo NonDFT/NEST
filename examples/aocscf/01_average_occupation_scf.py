@@ -13,11 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Run noncollinear tensor TDA from a high-spin ROKS reference."""
+"""Optimize orbitals with average occupations and report the high-spin energy."""
 
 from pyscf import gto
-
-from nest import nttda
+from nest import aocscf  # noqa: F401 - registers ROKS.average_occ()
 
 mol = gto.M(
     atom="""
@@ -28,16 +27,11 @@ mol = gto.M(
     """,
     basis="6-31g",
     spin=2,
-    symmetry=True,
+    symmetry=True
 )
-mf = mol.ROKS(xc="CAM-B3LYP").run()
+mf = mol.ROKS(xc="SVWN").average_occ().run()
 
-td = mf.NTTDA()
-td.deltaS = -1  # Final spin: Sf = Si + deltaS. Valid values are -1, 0, and +1.
-td.nobeta = False
-td.nstates = 5
-td.kernel()
-
-td.analyze(verbose=4)
-print(f"Total energies (Ha): {td.e_tot}", end=",\n")
-print(f"which equals to mf.e_tot + td.e: {mf.e_tot + td.e}")
+print(f"SCF converged: {mf.converged}")
+print(f"Average-occupation SCF energy: {mf.e_avg_occ:.12f} Ha")
+print(f"High-spin energy: {mf.e_tot:.12f} Ha")
+mf.analyze(verbose=4)  # same as other SCF methods

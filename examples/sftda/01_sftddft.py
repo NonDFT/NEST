@@ -67,6 +67,9 @@ sfd_tddft.collinear_samples = 20
 
 sfd_tddft.kernel()
 sfd_tddft.analyze(verbose=4)  # Verbose=4 shows orbital composition
+print(f"Total energies (Ha): {sfd_tddft.e_tot}", end=",\n")
+print(f"which equals to mf.e_tot + sfd_tddft.e: {mf.e_tot + sfd_tddft.e}")
+
 
 # -------------------------------------------------------------------
 # 3. Validation: Full Diagonalization of Casida Matrix

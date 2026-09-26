@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Regression tests for the Dz0SCF high-spin-reference analytic gradient.
+"""Regression tests for the average-occupation SCF high-spin analytic gradient.
 
 The reference values were generated with PySCF 2.13.0.  The analytic-gradient
 implementation was independently checked against central finite differences.
@@ -27,8 +27,8 @@ import unittest
 import numpy as np
 from pyscf import gto
 
-from nest.dz0scf import DZ0SCF
-from nest.grad.dz0scf import Gradients
+from nest import aocscf
+from nest.grad.aocscf import Gradients
 
 
 GRADIENT_ATOL = 1.0e-6
@@ -55,8 +55,8 @@ CH2_B3LYP_OPEN2_GRAD = np.array(
 )
 
 
-def run_dz0_gradient(atom, spin, xc, basis):
-    """Run one tightly converged and reproducible Dz0SCF gradient."""
+def run_aocscf_gradient(atom, spin, xc, basis):
+    """Run one tightly converged and reproducible average-occupation gradient."""
     mol = gto.M(
         atom=atom,
         unit="Angstrom",
@@ -68,7 +68,7 @@ def run_dz0_gradient(atom, spin, xc, basis):
         output="/dev/null",
     )
 
-    mf = DZ0SCF(mol, xc=xc)
+    mf = mol.ROKS(xc=xc).average_occ()
     mf.conv_tol = 1.0e-12
     mf.conv_tol_grad = 1.0e-9
     mf.max_cycle = 120
@@ -78,15 +78,15 @@ def run_dz0_gradient(atom, spin, xc, basis):
     mf.kernel()
     if not mf.converged:
         mol.stdout.close()
-        raise RuntimeError(f"{xc}/{basis} Dz0SCF did not converge")
+        raise RuntimeError(f"{xc}/{basis} average-occupation SCF did not converge")
 
-    # Exercise the public API installed on the Dz0SCF class/mixin.
+    # Exercise the public API installed on the average-occupation class.
     grad_obj = mf.nuc_grad_method()
     if not isinstance(grad_obj, Gradients):
         mol.stdout.close()
         raise TypeError(
-            "DZ0SCF.nuc_grad_method() did not return "
-            "nest.grad.dz0scf.Gradients"
+            "AverageOccupationROKS.nuc_grad_method() did not return "
+            "nest.grad.aocscf.Gradients"
         )
 
     grad_obj.conv_tol = 1.0e-10
@@ -97,7 +97,7 @@ def run_dz0_gradient(atom, spin, xc, basis):
 
 
 class KnownValues(unittest.TestCase):
-    def assert_dz0_result(
+    def assert_aocscf_result(
         self,
         mf,
         grad_obj,
@@ -114,7 +114,7 @@ class KnownValues(unittest.TestCase):
 
         self.assertEqual(observed_space, expected_space)
         self.assertLess(
-            float(np.max(np.abs(grad_obj.g_dz0))),
+            float(np.max(np.abs(grad_obj.g_avg_occ))),
             STATIONARITY_TOL,
         )
 
@@ -138,7 +138,7 @@ class KnownValues(unittest.TestCase):
 
     def test_pbe_nh2_gradient(self):
         """Check all NH2/PBE/6-31G components in a 44-D response space."""
-        mol, mf, grad_obj, gradient = run_dz0_gradient(
+        mol, mf, grad_obj, gradient = run_aocscf_gradient(
             atom="""
                 N   0.000000  -0.040000   0.000000
                 H   0.000000   0.780000   0.590000
@@ -149,7 +149,7 @@ class KnownValues(unittest.TestCase):
             basis="6-31g",
         )
         try:
-            self.assert_dz0_result(
+            self.assert_aocscf_result(
                 mf,
                 grad_obj,
                 gradient,
@@ -161,7 +161,7 @@ class KnownValues(unittest.TestCase):
 
     def test_b3lyp_ch2_two_open_orbitals_gradient(self):
         """Check all CH2 components with a two-dimensional open-shell space."""
-        mol, mf, grad_obj, gradient = run_dz0_gradient(
+        mol, mf, grad_obj, gradient = run_aocscf_gradient(
             atom="""
                 C    0.020000  -0.030000   0.010000
                 H   -0.020000   0.800000   0.620000
@@ -172,7 +172,7 @@ class KnownValues(unittest.TestCase):
             basis="sto-3g",
         )
         try:
-            self.assert_dz0_result(
+            self.assert_aocscf_result(
                 mf,
                 grad_obj,
                 gradient,
