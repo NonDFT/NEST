@@ -21,7 +21,7 @@ from pyscf.grad import rhf as rhf_grad
 from pyscf.grad import tdrhf as tdrhf_grad
 from pyscf.lib import logger
 from nest.nttda import NTTDA
-from nest.aocscf import AverageOccupationROKS, SymAdaptedAverageOccupationROKS
+from nest.nttda.nttda import _orbital_indices, _unpack_amplitudes
 
 from . import delta_s_minus_one, delta_s_zero
 
@@ -30,6 +30,40 @@ from . import delta_s_minus_one, delta_s_zero
 def _normalized_amplitude(xy):
     vector = np.asarray(xy[0]).ravel()
     return vector / np.linalg.norm(vector)
+
+
+def _aligned_amplitudes(reference, displaced):
+    """Express displaced amplitudes in the reference's C/O/V orbital frames."""
+    overlap = gto.intor_cross("int1e_ovlp", reference.mol, displaced.mol)
+    rotations = []
+    for ref_idx, new_idx in zip(_orbital_indices(reference), _orbital_indices(displaced)):
+        ref_mo = reference._scf.mo_coeff[:, ref_idx]
+        new_mo = displaced._scf.mo_coeff[:, new_idx]
+        # The polar factor aligns each occupation space, including signs,
+        # permutations and rotations, without mixing distinct CSF sectors.
+        u, _, vh = np.linalg.svd(ref_mo.conj().T @ overlap @ new_mo, full_matrices=False)
+        rotations.append(u @ vh)
+    c, o, v = rotations
+    nc, no, nv = (rotation.shape[1] for rotation in rotations)
+    amplitudes = []
+    for state in range(len(displaced.xy)):
+        co, cv, oo, ov, cv0 = _unpack_amplitudes(displaced, state, nc, no, nv)
+        # X[i,a] carries a conjugated hole and an unconjugated particle index.
+        cv = c.conj() @ cv @ v.T
+        if displaced.deltaS == 1:
+            x = cv
+        else:
+            co = c.conj() @ co @ o.T
+            ov = o.conj() @ ov @ v.T
+            if displaced.deltaS == 0:
+                # The spin-conserving OO amplitude is a scalar, not an O×O block.
+                cv0 = c.conj() @ cv0 @ v.T
+                x = np.concatenate((co.ravel(), cv.ravel(), [oo], ov.ravel(), cv0.ravel()))
+            else:
+                oo = o.conj() @ oo @ o.T
+                x = np.block([[co, cv], [oo, ov]])
+        amplitudes.append(_normalized_amplitude((x, 0)))
+    return np.asarray(amplitudes)
 
 
 def _copy_td_settings(source, target):
@@ -42,23 +76,16 @@ def _copy_td_settings(source, target):
 
 
 def _displaced_reference(source, mol, fixed_grid):
-    if isinstance(source, (AverageOccupationROKS, SymAdaptedAverageOccupationROKS)):
-        reference = dft.ROKS(mol).average_occ()
-    elif isinstance(source, dft.KohnShamDFT):
-        reference = dft.ROKS(mol)
-    else:
-        reference = source.__class__(mol)
-    for name in (
-            "conv_tol", "conv_tol_grad", "max_cycle", "max_memory",
-            "level_shift", "damp"):
-        if hasattr(source, name):
-            setattr(reference, name, getattr(source, name))
+    reference = source.copy()
+    if isinstance(source, dft.KohnShamDFT):
+        # reset() mutates grids; detach them before clearing geometry caches.
+        reference.grids = source.grids.copy()
+        reference.nlcgrids = source.nlcgrids.copy()
+        reference._numint = source._numint.copy()
+    reference.reset(mol)
+    reference.chkfile = None
     reference.verbose = 0
     if isinstance(source, dft.KohnShamDFT):
-        reference.xc = source.xc
-        reference.nlc = source.nlc
-        reference.grids.level = source.grids.level
-        reference.grids.prune = source.grids.prune
         if fixed_grid and source.grids.coords is not None:
             reference.grids.coords = np.array(source.grids.coords, copy=True)
             reference.grids.weights = np.array(source.grids.weights, copy=True)
@@ -185,8 +212,8 @@ class Gradients(rhf_grad.GradientsBase):
         tdobj = _copy_td_settings(self.base, NTTDA(mf))
         tdobj.kernel()
         overlaps = np.asarray([
-            abs(np.vdot(reference_amplitude, _normalized_amplitude(xy)))
-            for xy in tdobj.xy
+            abs(np.vdot(reference_amplitude, amplitude))
+            for amplitude in _aligned_amplitudes(self.base, tdobj)
         ])
         root = int(np.argmax(overlaps))
         if not tdobj.converged[root]:
