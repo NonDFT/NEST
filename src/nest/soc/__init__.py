@@ -18,7 +18,9 @@
 
 """Spin-orbit coupling drivers and AO integrals."""
 
+from nest.soc.nttda import SOC as NTTDASOC
 from nest.soc.sftda import SOC as SFTDASOC
 from nest.soc.soc import SOCBase, SpinFreeState
+from nest.soc.tdrhf import SOC as TDRHFSOC
 
-__all__ = ['SOCBase', 'SpinFreeState', 'SFTDASOC']
+__all__ = ['SOCBase', 'SpinFreeState', 'NTTDASOC', 'SFTDASOC', 'TDRHFSOC']
