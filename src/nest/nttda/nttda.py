@@ -1095,6 +1095,11 @@ class NTTDA(TDBase):
         from nest.nttda.get_ab import get_ab
         return get_ab(self._scf, deltaS=self.deltaS, nobeta=self.nobeta)
 
+    def SOC(self, *others, soctype='SOMF', include_reference=False):
+        """Couple converged NTTDA states through state-interaction SOC."""
+        from nest.soc.nttda import SOC
+        return SOC(self, *others, soctype=soctype, include_reference=include_reference)
+
     gen_vind_sfu = gen_vind_sfu
     gen_vind_sc = gen_vind_sc
     gen_vind_sfd = gen_vind_sfd

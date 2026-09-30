@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""SOC driver for spin-flip TDA and TDDFT."""
+"""SOC driver for spin-flip TDA and TDDFT.
+Ref: J. Chem. Phys. 2022, 157, 224110.
+"""
 
 import numpy as np
 from pyscf import lib
@@ -27,13 +29,38 @@ class SOC(SOCBase):
 
     _keys = {'tdobj', 'sz'}
 
-    def __init__(self, tdobj, soctype='SOMF'):
+    def __init__(self, tdobj=None, soctype='SOMF'):
+        super().__init__(soctype=soctype)
+        self.tdobj = tdobj
+        self.sz = None
+
+    def _initialize_states(self):
+        tdobj = self.tdobj
+        if tdobj is None:
+            raise ValueError('Set tdobj to a converged SFTDA/SFTDDFT object before running SOC')
         if tdobj.extype != 1:
             raise ValueError('SFTDA SOC currently supports extype=1 only')
         if getattr(tdobj, 'e', None) is None or getattr(tdobj, 'xy', None) is None:
             raise ValueError('Run the SFTDA/SFTDDFT kernel before SOC')
         assert np.isrealobj(tdobj._scf.mo_coeff), 'SFTDA SOC requires real MO coefficients'
 
+        self._scf = tdobj._scf
+        if self.verbose is None:
+            self.verbose = getattr(self._scf, 'verbose', logger.NOTE)
+        if self.stdout is None:
+            self.stdout = getattr(self._scf, 'stdout', None)
+
+        log = logger.new_logger(self)
+        log.info('\n')
+        if not getattr(self._scf, 'converged', False):
+            log.warn('Ground state SCF is not converged')
+        converged = getattr(tdobj, 'converged', None)
+        if converged is not None:
+            unconverged = np.where(~np.asarray(converged, dtype=bool).reshape(-1))[0]
+            if unconverged.size:
+                log.warn('SF-TD states %s are not converged', unconverged.tolist())
+
+        self.sz = 0.5 * self._scf.mol.spin - 1
         spin_square = np.asarray(tdobj.spin_square(), dtype=float)
         states = []
         for root, energy in enumerate(tdobj.e):
@@ -49,12 +76,10 @@ class SOC(SOCBase):
                 energy=float(energy),
                 spin=spin,
                 amplitude=amplitude,
-                label=f'SF state {root + 1}',
+                label=f'state {root + 1}',
                 spin_square=s2,
             ))
-        super().__init__(tdobj._scf, states, soctype=soctype)
-        self.tdobj = tdobj
-        self.sz = 0.5 * self._scf.mol.spin - 1
+        return states
 
     def reduced_transition_density(self, bra, ket):
         nao = self._scf.mol.nao_nr()

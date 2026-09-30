@@ -12,13 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
 import unittest
+
 from pyscf import gto, lib
 from nest.soc import soc_ao
 
 
+try:
+    import socutils  # noqa: F401
+except ImportError:
+    HAS_SOCUTILS = False
+else:
+    HAS_SOCUTILS = True
+
+
 def fp(mat):
     return lib.fp(mat)
+
 
 class KnownValues(unittest.TestCase):
     @classmethod
@@ -74,6 +85,35 @@ class KnownValues(unittest.TestCase):
 
         ref = -0.0023423479533036867 - 0.0013759118729275677j
         ao_soc = soc_ao.get_ao_soc(mf, 'SOMF')
+        self.assertEqual(ao_soc.shape, (3, self.mol.nao_nr(), self.mol.nao_nr()))
+        self.assertAlmostEqual(abs(fp(ao_soc) - ref), 0, delta=1e-9)
+
+    def test_somf_amfi_soc_ao(self):
+        mf = self.mol.ROKS(xc='HF').run()
+        self.assertTrue(mf.converged)
+
+        ref = -0.002258000497354782 - 0.001309642786448594j
+        ao_soc = soc_ao.get_ao_soc(mf, 'SOMF_AMFI')
+        self.assertEqual(ao_soc.shape, (3, self.mol.nao_nr(), self.mol.nao_nr()))
+        self.assertAlmostEqual(abs(fp(ao_soc) - ref), 0, delta=1e-9)
+
+    def test_x2c1e_soc_ao(self):
+        ref = -0.0035149790489170775 - 0.002067624769849547j
+        ao_soc = soc_ao.get_ao_soc(SimpleNamespace(mol=self.mol), 'X2C1E')
+        self.assertEqual(ao_soc.shape, (3, self.mol.nao_nr(), self.mol.nao_nr()))
+        self.assertAlmostEqual(abs(fp(ao_soc) - ref), 0, delta=1e-9)
+
+    @unittest.skipUnless(HAS_SOCUTILS, 'socutils is not installed')
+    def test_x2camf_soc_ao(self):
+        ref = -0.002270958919990373 - 0.00131052918540656j
+        ao_soc = soc_ao.get_ao_soc(SimpleNamespace(mol=self.mol), 'X2CAMF')
+        self.assertEqual(ao_soc.shape, (3, self.mol.nao_nr(), self.mol.nao_nr()))
+        self.assertAlmostEqual(abs(fp(ao_soc) - ref), 0, delta=1e-9)
+
+    @unittest.skipUnless(HAS_SOCUTILS, 'socutils is not installed')
+    def test_x2cmp_soc_ao(self):
+        ref = -0.0022231653593819713 - 0.0012960492601477023j
+        ao_soc = soc_ao.get_ao_soc(SimpleNamespace(mol=self.mol), 'X2CMP')
         self.assertEqual(ao_soc.shape, (3, self.mol.nao_nr(), self.mol.nao_nr()))
         self.assertAlmostEqual(abs(fp(ao_soc) - ref), 0, delta=1e-9)
 

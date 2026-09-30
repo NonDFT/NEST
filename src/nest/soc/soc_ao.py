@@ -13,7 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""SOC Hamiltonian in AO basis."""
+"""Spin-orbit-coupling operators in the AO basis.
+
+All operators are returned as a complex spherical tensor in component order
+``[-1, 0, +1]``.
+"""
+
+import copy
 
 import numpy as np
 from pyscf.scf.jk import get_jk
@@ -21,11 +27,34 @@ from pyscf.data.nist import LIGHT_SPEED
 
 X2CAMF_XRESP = True
 
+
+def _cartesian_to_spherical(ao_soc):
+    """Convert Cartesian SOC components to the ``[-1, 0, +1]`` convention."""
+    ao_soc_1 = -0.5 * (ao_soc[0] + 1j * ao_soc[1])
+    ao_soc_0 = np.sqrt(0.5) * ao_soc[2]
+    ao_soc_m1 = 0.5 * (ao_soc[0] - 1j * ao_soc[1])
+    return np.array([ao_soc_m1, ao_soc_0, ao_soc_1])
+
+
+def _spinor_to_cartesian_soc(mol, h_spinor):
+    """Extract the Cartesian SOC operator from a two-component Hamiltonian."""
+    spinor_coeff = np.vstack(mol.sph2spinor_coeff())
+    h_spin = np.einsum('ip,pq,jq->ij', spinor_coeff, h_spinor, spinor_coeff.conj(), optimize=True)
+    nao = mol.nao_nr()
+    h_aa = h_spin[:nao, :nao]
+    h_bb = h_spin[nao:, nao:]
+    h_ab = h_spin[:nao, nao:]
+    h_ba = h_spin[nao:, :nao]
+    return np.array([h_ab + h_ba, 1j * (h_ab - h_ba), h_aa - h_bb])
+
+
 def sozeff(atom, zeff_type="one"):
-    """
-    Calculate effective nuclear charge for given atomic number
-    copied from: https://github.com/masaya0222/PyGraSO/blob/main/pygraso/calc_ao_element.py
-    Author: Masaya Hagai <hagai.masaya.v9@s.mail.nagoya-u.ac.jp>
+    """Calculate an effective nuclear charge for an atomic number.
+
+    The parametrization is adapted from PyGraSO by Masaya Hagai:
+    https://github.com/masaya0222/PyGraSO/blob/main/pygraso/calc_ao_element.py
+
+    Ref: J. Chem. Theory Comput. 2025, 21, 11604.
     """
     assert zeff_type in ["one", "orca", "pysoc"], f"{zeff_type=} is not valid"
     neval = {
@@ -150,95 +179,121 @@ def sozeff(atom, zeff_type="one"):
             raise ValueError(f"SOZEFF is not available for atomic number {atom}")
 
 def get_ao_soc_1e(mol, zeff_type='one'):
-    '''
-    The one-body part of Hsoc operator with (effective) nuclear charge.
-    '''
+    """The one-body part of Hsoc operator with (effective) nuclear charge."""
     zeff_list = [sozeff(mol.atom_charge(i), zeff_type=zeff_type) for i in range(mol.natm)]
     ao_soc = np.zeros((3, mol.nao_nr(), mol.nao_nr()), dtype=np.complex128)
     for k in range(mol.natm):
         mol.set_rinv_orig(mol.atom_coord(k))
         ao_soc += (-1.0j) * zeff_list[k] * mol.intor('int1e_prinvxp')
     ao_soc /= (2.0 * LIGHT_SPEED**2)
-    ao_soc_1 = -0.5 * (ao_soc[0] + 1j * ao_soc[1])
-    ao_soc_0 = np.sqrt(0.5) * ao_soc[2]
-    ao_soc_m1 = 0.5 * (ao_soc[0] - 1j * ao_soc[1])
-    return np.array([ao_soc_m1, ao_soc_0, ao_soc_1])
+    return _cartesian_to_spherical(ao_soc)
+
 
 def get_ao_soc_x2camf(mol):
-    import resource
-    try:
-        soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
-        target = resource.RLIM_INFINITY if hard == resource.RLIM_INFINITY else hard
-        resource.setrlimit(resource.RLIMIT_STACK, (target, hard))
-    except Exception as e:
-        print(f"Warning: failed to increase stack size: {e}")
+    """Return the X2CAMF SOC operator.
+    Ref: Chem. Phys. Rev. 2025, 6, 031404.
+    """
     try:
         from socutils.somf import somf_pt
-    except ImportError:
-        raise ImportError("Please install socutils package to use X2CAMF SOC integrals." \
-        "https://github.com/wtpeter/socutils")
+    except ImportError as err:
+        raise ImportError(
+            'Please install socutils package to use X2CAMF SOC integrals. '
+            'https://github.com/wtpeter/socutils'
+        ) from err
     ao_soc = 2j * somf_pt.get_psoc_x2camf(mol, xresp=X2CAMF_XRESP)
-    ao_soc_1 = -0.5 * (ao_soc[0] + 1j * ao_soc[1])
-    ao_soc_0 = np.sqrt(0.5) * ao_soc[2]
-    ao_soc_m1 = 0.5 * (ao_soc[0] - 1j * ao_soc[1])
-    return np.array([ao_soc_m1, ao_soc_0, ao_soc_1])
+    return _cartesian_to_spherical(ao_soc)
 
-def get_ao_soc_2e_somf(mf):
-    '''
-    The two-electron part of the Hsoc under the SOMF approximation
-    using direct SCF for UKS density matrix.
-    '''
+
+def get_ao_soc_x2c1e(mol):
+    """Return the spin-dependent part of PySCF's spinor X2C1e core."""
+    from pyscf.x2c.x2c import SpinorX2CHelper
+
+    h_x2c1e = SpinorX2CHelper(mol).get_hcore(mol)
+    return _cartesian_to_spherical(_spinor_to_cartesian_soc(mol, h_x2c1e))
+
+
+def get_ao_soc_x2cmp(mol):
+    """Build the X2CMP core and return its Pauli spin-dependent part.
+    Ref: Chem. Phys. Rev. 2025, 6, 031404.
+    """
+    try:
+        from socutils.somf.x2cmp import SpinorX2CMPHelper
+    except ImportError as err:
+        raise ImportError(
+            'Please install socutils package to use X2CMP SOC integrals. '
+            'https://github.com/wtpeter/socutils'
+        ) from err
+
+    x2cobj = SpinorX2CMPHelper(
+        mol,
+        x2cmp='x2cmp',
+        with_gaunt=True,
+        with_breit=True,
+        with_pcc=False,
+    )
+    h_x2cmp = x2cobj.get_hcore(mol)
+    return _cartesian_to_spherical(_spinor_to_cartesian_soc(mol, h_x2cmp))
+
+
+def get_ao_soc_2e_somf(mf, amfi=False):
+    """Return the two-electron SOC in the SOMF approximation.
+
+    Direct SCF is used.  If ``amfi`` is true, only one-center AO blocks are
+    retained.
+
+    Ref: J. Chem. Phys. 2005, 122, 034107.
+         J. Chem. Phys. 2022, 157, 224110.
+    """
     mol = mf.mol
     dm = mf.make_rdm1()
 
-    if dm.ndim == 2:
-        dmaa = dmbb = 0.5 * dm
+    if dm.ndim == 3:
+        dm = dm[0] + dm[1]
+
+    dm_list = [dm, dm, dm]
+    scripts = ['ijkl,lk->ij', 'ijkl,jk->il', 'ijkl,li->kj']
+    if amfi:
+        nao = mol.nao_nr()
+        vj = np.zeros((3, nao, nao))
+        vk1 = np.zeros_like(vj)
+        vk2 = np.zeros_like(vj)
+        aoslices = mol.aoslice_by_atom(mol.ao_loc_nr())
+        atom = copy.copy(mol)
+        for b0, b1, p0, p1 in aoslices:
+            atom._bas = mol._bas[b0:b1]
+            dm_atom = dm[p0:p1, p0:p1]
+            vj_atom, vk1_atom, vk2_atom = get_jk(
+                atom,
+                [dm_atom, dm_atom, dm_atom],
+                scripts=scripts,
+                intor='int2e_p1vxp1',
+                comp=3,
+                aosym='a4ij',
+            )
+            vj[:, p0:p1, p0:p1] = vj_atom
+            vk1[:, p0:p1, p0:p1] = vk1_atom
+            vk2[:, p0:p1, p0:p1] = vk2_atom
     else:
-        dmaa, dmbb = dm
+        vj, vk1, vk2 = get_jk(
+            mol,
+            dm_list,
+            scripts=scripts,
+            intor='int2e_p1vxp1',
+            comp=3,
+            aosym='a4ij',
+        )
 
-    dm_list = [dmaa, dmaa, dmaa, dmbb, dmbb, dmbb]
-    scripts = [
-        'ijkl,lk->ij', # J for dmaa
-        'ijkl,jk->il', # K1 for dmaa
-        'ijkl,li->kj', # K2 for dmaa
-        'ijkl,lk->ij', # J for dmbb
-        'ijkl,jk->il', # K1 for dmbb
-        'ijkl,li->kj'  # K2 for dmbb
-    ]
-    v_matrices = get_jk(mol, dm_list, scripts=scripts, intor='int2e_p1vxp1', comp=3, aosym='a4ij')
-    vj_aa, vk1_aa, vk2_aa = v_matrices[0:3]
-    vj_bb, vk1_bb, vk2_bb = v_matrices[3:6]
-
-    v_cart_1 = (vj_aa - vk1_aa - 2 * vk2_aa) + (vj_bb - 2 * vk1_bb - vk2_bb)
-    v_cart_0 = (vj_aa + vj_bb) - 1.5 * (vk1_aa + vk1_bb) - 1.5 * (vk2_aa + vk2_bb)
-    v_cart_m1 = (vj_aa - 2 * vk1_aa - vk2_aa) + (vj_bb - vk1_bb - 2 * vk2_bb)
-
-    def to_spherical(v_cart_xyz, component):
-        # v_cart_xyz shape is (3, nao, nao)
-        vx = v_cart_xyz[0]
-        vy = v_cart_xyz[1]
-        vz = v_cart_xyz[2]
-        if component == 1:
-            return -0.5 * (vx + 1j * vy)
-        elif component == 0:
-            return np.sqrt(0.5) * vz
-        elif component == -1:
-            return 0.5 * (vx - 1j * vy)
-
-    prefactor = 1j / (2.0 * LIGHT_SPEED**2)
-    soc_somf_1 = to_spherical(v_cart_1, 1) * prefactor
-    soc_somf_0 = to_spherical(v_cart_0, 0) * prefactor
-    soc_somf_m1 = to_spherical(v_cart_m1, -1) * prefactor
-    soc_somf_1, soc_somf_m1 = (
-        0.5 * (soc_somf_1 + soc_somf_m1.conj()),
-        0.5 * (soc_somf_m1 + soc_somf_1.conj()),
-    )
-    return np.array([soc_somf_m1, soc_somf_0, soc_somf_1])
+    ao_soc = 1j / (2.0 * LIGHT_SPEED**2) * (vj - 1.5 * (vk1 + vk2))
+    return _cartesian_to_spherical(ao_soc)
 
 
 def _symmetrize_ao_soc(soc_ao):
     """Enforce the Hermiticity relations of a rank-one spherical tensor."""
     soc_m1, soc_0, soc_1 = soc_ao
+    soc_1, soc_m1 = (
+        0.5 * (soc_1 + soc_m1.conj()),
+        0.5 * (soc_m1 + soc_1.conj()),
+    )
     soc_0 = 0.5 * (soc_0 + soc_0.conj().T)
     soc_m1, soc_1 = (
         0.5 * (soc_m1 - soc_1.conj().T),
@@ -247,16 +302,24 @@ def _symmetrize_ao_soc(soc_ao):
     return np.array([soc_m1, soc_0, soc_1])
 
 def get_ao_soc(mf, soctype):
+    """Dispatch a supported ``soctype`` and return its AO SOC tensor."""
     mol = mf.mol
     if soctype == 'SOMF':
         soc_ao = get_ao_soc_1e(mol, zeff_type='one')
         soc_ao += get_ao_soc_2e_somf(mf)
+    elif soctype == 'SOMF_AMFI':
+        soc_ao = get_ao_soc_1e(mol, zeff_type='one')
+        soc_ao += get_ao_soc_2e_somf(mf, amfi=True)
     elif soctype == 'Zeff':
         soc_ao = get_ao_soc_1e(mol, zeff_type='orca')
     elif soctype == '1e':
         soc_ao = get_ao_soc_1e(mol, zeff_type='one')
+    elif soctype == 'X2C1E':
+        soc_ao = get_ao_soc_x2c1e(mol)
     elif soctype == 'X2CAMF':
         soc_ao = get_ao_soc_x2camf(mol)
+    elif soctype == 'X2CMP':
+        soc_ao = get_ao_soc_x2cmp(mol)
     else:
         raise ValueError(f'soctype={soctype} is not supported.')
     return _symmetrize_ao_soc(soc_ao)

@@ -22,9 +22,9 @@ It is built on top of the PySCF electronic structure package.
         ▼                          ▼                          ▼
 Noncollinear TDDFT         Noncollinear SF-TDDFT      Noncollinear Tensor TDA
                                    ├── Gradients            ├── Gradients
-                                   ├── Oscillator strengths └── SOC (in progress)
-                                   ├── NADC
-                                   └── SOC
+                                   ├── Oscillator strengths ├── Oscillator strengths
+                                   ├── NADC                 ├── NADC (in progress)
+                                   └── SOC                  └── SOC
 ```
 
 ## Features
@@ -52,7 +52,9 @@ Noncollinear TDDFT         Noncollinear SF-TDDFT      Noncollinear Tensor TDA
 
   - Analytic gradients for ΔS = −1 and 0 on ROKS and average-occupation ROKS (AOCSCF) references
   - Finite-difference gradients for all three spin channels
-  - SOC *(in progress)*
+  - Oscillator strengths
+  - NADC *(in progress)*
+  - SOC
 
   `td.Gradients().kernel(state=n)` returns the gradient of the selected total
   energy (`state=1` is the lowest NTTDA root; `state=0` is the reference).
@@ -158,4 +160,4 @@ If you use NEST in your research, please cite the relevant publication(s) listed
 
 ### Noncollinear Tensor TDA (NT-TDA)
 
-- NT-TDA (https://arxiv.org/abs/2607.19933, 2026)
+- NT-TDA (JCTC, 2026) https://doi.org/10.1021/acs.jctc.6c01470
