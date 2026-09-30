@@ -22,9 +22,9 @@ It is built on top of the PySCF electronic structure package.
         ▼                          ▼                          ▼
 Noncollinear TDDFT         Noncollinear SF-TDDFT      Noncollinear Tensor TDA
                                    ├── Gradients            ├── Gradients (in progress)
-                                   ├── Oscillator strengths └── SOC
-                                   ├── NADC
-                                   └── SOC
+                                   ├── Oscillator strengths ├── Oscillator strengths
+                                   ├── NADC                 ├── NADC (in progress)
+                                   └── SOC                  └── SOC
 ```
 
 ## Features
@@ -51,25 +51,9 @@ Noncollinear TDDFT         Noncollinear SF-TDDFT      Noncollinear Tensor TDA
   NT-TDA is a spin-consistent extension of noncollinear TDDFT that provides a unified treatment of spin-conserving and spin-flip excitations. For an open-shell reference state with total spin S, it can describe target states with total spins S−1 (except for S = 1/2), S, and S+1. All resulting states are free from spin contamination.
 
   - Analytic gradients *(in progress)*
-  - State-interaction SOC for `deltaS=-1,0,+1`
-
-- State-interaction spin–orbit coupling
-
-  Couple converged spin-free states and diagonalize their SOC Hamiltonian:
-
-  - `NTTDASOC`: spin-adapted NTTDA states, also available as `td.SOC(...)`.
-  - `TDRHFSOC`: closed-shell RHF/RKS singlet and triplet TDA/TDDFT states.
-    TDDFT uses normalized `X+Y` Casida amplitudes for the state interaction.
-  - `SFTDASOC`: SF-TDA/SF-TDDFT states (`extype=1`).
-
-  All inputs to a joint calculation must use the same reference orbitals.
-  Results are stored in `h_soc` (Hartree), `e`, `v`, and `state_slices`;
-  `analyze()` reports couplings and state compositions.
-  See the [NTTDA example](examples/soc/02_nttda_soc.py) and
-  [closed-shell TDA/TDDFT example](examples/soc/03_tdrhf_soc.py).
-
-  AO operators are `1e`, `Zeff`, `SOMF`, `SOMF_AMFI`, `X2C1E`, `X2CAMF`,
-  and `X2CMP`. The last two require the optional `socutils` package.
+  - Oscillator strengths
+  - NADC *(in progress)*
+  - SOC
 
 
 ## Authors

@@ -59,7 +59,7 @@ soc_driver = TDRHFSOC(
     include_reference=True,
 ).run()
 
-# 4. Print scalar states, every SOC block, coupled eigenvalues, and eigenvectors.
+# 4. Analyze the NEST results: scalar states, SOC blocks, and coupled states.
 soc_driver.analyze(verbose=6)
 
 # Raw numerical data are available without parsing the analysis output.
@@ -70,7 +70,8 @@ print("\nNEST spin-orbit-coupled energies from the lowest state / cm^-1")
 print((soc_driver.e - soc_driver.e.min()).real * HARTREE2WAVENUMBER)
 
 
-r"""
+# Print the stored ORCA reference for comparison; this does not run ORCA.
+print(r"""
 ORCA input
 ==========
 
@@ -148,4 +149,4 @@ Eigenvalues of the SOC matrix:
     10:      50359.76         6.2438
     11:      52098.34         6.4594
     12:      59318.26         7.3545
-"""
+""")

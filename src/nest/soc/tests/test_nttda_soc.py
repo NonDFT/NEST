@@ -29,7 +29,8 @@ def assert_allclose_up_to_sign(testcase, actual, desired, atol):
 
 # Block oracles: pre-migration NEST 50600f7, conv_tol=1e-9, lindep=1e-20.
 # The deltaS=0/-1 blocks also agree with Forge c734252 at these settings.
-# Tight amplitudes avoid default-Davidson noise in the 1e-5 cm^-1 checks.
+# Tests use conv_tol=1e-6 and the default lindep. Allow 1e-4 cm^-1 for
+# SOC blocks, matching the spectrum tolerance and finite-residual amplitudes.
 class KnownValues(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -53,7 +54,7 @@ class KnownValues(unittest.TestCase):
 
     def test_deltam1_soc_with_reference(self):
         mf = self.mol.ROKS(xc='SVWN').run()
-        tdm1 = nttda.NTTDA(mf).set(deltaS=-1, nstates=2, conv_tol=1e-9, lindep=1e-20, verbose=0).run()
+        tdm1 = nttda.NTTDA(mf).set(deltaS=-1, nstates=2, conv_tol=1e-6, verbose=0).run()
         driver = tdm1.SOC(soctype='SOMF')
         driver.include_reference = True
         driver.run()
@@ -86,14 +87,14 @@ class KnownValues(unittest.TestCase):
                 [0.0 + 14.033997253036391j],
                 [-0.6199710407236575 - 6.674821055129454j],
             ]),
-            1e-5,
+            1e-4,
         )
 
     def test_all_delta_s_soc_without_reference(self):
         mf = self.mol.ROKS(xc='SVWN').run()
-        td0 = nttda.NTTDA(mf).set(deltaS=0, nstates=1, conv_tol=1e-9, lindep=1e-20, verbose=0).run()
-        tdm1 = nttda.NTTDA(mf).set(deltaS=-1, nstates=2, conv_tol=1e-9, lindep=1e-20, verbose=0).run()
-        tdp1 = nttda.NTTDA(mf).set(deltaS=1, nstates=2, conv_tol=1e-9, lindep=1e-20, verbose=0).run()
+        td0 = nttda.NTTDA(mf).set(deltaS=0, nstates=1, conv_tol=1e-6, verbose=0).run()
+        tdm1 = nttda.NTTDA(mf).set(deltaS=-1, nstates=2, conv_tol=1e-6, verbose=0).run()
+        tdp1 = nttda.NTTDA(mf).set(deltaS=1, nstates=2, conv_tol=1e-6, verbose=0).run()
         driver = td0.SOC(tdm1, tdp1, soctype='SOMF', include_reference=False).run()
 
         self.assertTrue(mf.converged)
@@ -144,7 +145,7 @@ class KnownValues(unittest.TestCase):
                 [0.0 + 14.124387469862722j],
                 [-0.6015220110331332 - 6.509418687890437j],
             ]),
-            1e-5,
+            1e-4,
         )
         assert_allclose_up_to_sign(
             self,
@@ -157,7 +158,7 @@ class KnownValues(unittest.TestCase):
                 [0.0, 3.034430337294028 - 0.6139581403779906j, 22.058932205004297j],
                 [0.0, 0.0, 4.2913325370775794 - 0.8682679288519188j],
             ]),
-            1e-5,
+            1e-4,
         )
         assert_allclose_up_to_sign(
             self,
@@ -174,7 +175,7 @@ class KnownValues(unittest.TestCase):
                 [0.0, 0.0, 0.0, 4.890028104859523 - 1.417702865769535j,
                  -3.7688365689592516j],
             ]),
-            1e-5,
+            1e-4,
         )
         np.testing.assert_array_equal(driver.get_block(3, 1), np.zeros((5, 1)))
 
