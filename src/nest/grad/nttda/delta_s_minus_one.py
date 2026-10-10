@@ -23,14 +23,12 @@ import numpy as np
 from pyscf import lib
 from nest.nttda.nttda import gen_rohf_response_sfd, _split_amplitudes
 
+from .driver import assemble_gradient
 from .common import (
-    assemble_gradient,
     orbital_spaces,
     pair_density,
     FockProjection,
     fock_probes,
-    fock_projection_q,
-    response_projection_q,
     ResponseTerm,
     _apply_reference_responses,
 
@@ -303,12 +301,10 @@ def grad_elec(
     )
     blocks = spin_lowering_block_data(spaces, amplitudes)
     response_terms = spin_lowering_response_terms(spaces.spin)
-    channel_data = (spaces, amplitudes, densities, blocks, response_terms)
     projections = spin_lowering_fock_projections(tdobj, xy)
-    probes = fock_probes(tdobj, projections)
     return assemble_gradient(
-        gradient_driver, tdobj, channel_data, probes,
-        fock_projection_q(tdobj, projections, spin_lowering_fock0_fockz(tdobj), probes),
-        response_projection_q(tdobj, channel_data, hfx_only=True),
+        gradient_driver, tdobj, spaces=spaces, densities=densities,
+        blocks=blocks, response_terms=response_terms, projections=projections,
+        operators=spin_lowering_fock0_fockz(tdobj, max_memory=gradient_driver.max_memory),
         atmlst=atmlst, tolerance=tolerance, max_cycle=max_cycle,
     )

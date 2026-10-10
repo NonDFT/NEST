@@ -26,7 +26,6 @@ from nest.nttda.nttda import _orbital_indices, _unpack_amplitudes
 from . import delta_s_minus_one, delta_s_zero
 
 
-
 def _normalized_amplitude(xy):
     vector = np.asarray(xy[0]).ravel()
     return vector / np.linalg.norm(vector)

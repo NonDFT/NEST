@@ -18,8 +18,6 @@ This module is channel-neutral: callers provide orbital spaces, transition
 densities, block projections, and response-term coefficients.
 """
 
-from dataclasses import dataclass
-
 import numpy as np
 
 from pyscf import lib
@@ -28,14 +26,7 @@ from pyscf.dft.numint import _dot_ao_ao_sparse, _scale_ao_sparse
 from pyscf.grad import tdrks as tdrks_grad
 from nest.aocscf import AverageOccupationROKS, SymAdaptedAverageOccupationROKS
 
-
-# Shared result and projection helpers
-
-@dataclass(frozen=True)
-class XCGradientTerms:
-    q_alpha: np.ndarray
-    q_beta: np.ndarray
-    direct: np.ndarray
+from .common import project_channel_potentials, reference_spin_densities, reference_spin_occupations
 
 
 # AO feature algebra
@@ -312,44 +303,10 @@ def _lda_matrix(ao0, weights):
     return ao0.T @ (ao0 * np.asarray(weights)[:, None])
 
 
-def _project_channel_potentials(tdobj, potentials, blocks):
-    """Project transition-factor potentials for any NTTDA spin channel."""
-    mo = np.asarray(tdobj._scf.mo_coeff)
-    q_alpha = np.zeros((mo.shape[1], mo.shape[1]))
-    q_beta = np.zeros_like(q_alpha)
-    for label, (target, source, coefficient) in blocks.items():
-        potential = mo.conj().T @ potentials[label] @ mo
-        q_beta[:, target] += potential[:, source] @ coefficient.T
-        q_alpha[:, source] += potential[target, :].T @ coefficient
-    return q_alpha, q_beta
-
-
-def _reference_spin_densities(tdobj):
-    """Spin densities of the variational reference used by the XC kernel."""
-    mf = tdobj._scf
-    mo = np.asarray(mf.mo_coeff)
-    if isinstance(mf, (AverageOccupationROKS, SymAdaptedAverageOccupationROKS)):
-        density = (mo * mf.mo_occ) @ mo.conj().T
-        return 0.5 * density, 0.5 * density
-    return (
-        mo[:, mf.mo_occ > 0] @ mo[:, mf.mo_occ > 0].T,
-        mo[:, mf.mo_occ == 2] @ mo[:, mf.mo_occ == 2].T,
-    )
-
-
-def _reference_spin_occupations(tdobj):
-    """Per-orbital alpha/beta occupations of the reference density."""
-    mf = tdobj._scf
-    occupation = np.asarray(mf.mo_occ)
-    if isinstance(mf, (AverageOccupationROKS, SymAdaptedAverageOccupationROKS)):
-        return 0.5 * occupation, 0.5 * occupation
-    return (occupation > 0).astype(float), (occupation == 2).astype(float)
-
-
 def _add_reference_q(tdobj, q_alpha, q_beta, matrix_alpha, matrix_beta):
     mf = tdobj._scf
     mo = np.asarray(mf.mo_coeff)
-    occupation_alpha, occupation_beta = _reference_spin_occupations(tdobj)
+    occupation_alpha, occupation_beta = reference_spin_occupations(tdobj)
     q_alpha += (
         mo.conj().T @ (matrix_alpha + matrix_alpha.T) @ mo
     ) * occupation_alpha[None, :]
@@ -631,9 +588,12 @@ def _reference_fref_kref(mf, rho0, xctype):
 
 
 def response_terms(
-        gradient_driver, tdobj, channel_data, atmlst=None,
-        with_direct=True):
-    """LDA/GGA/meta-GGA ``vref0/vref1`` M matrix and fixed-grid skeleton derivative."""
+        gradient_driver, tdobj, densities, blocks, terms, atmlst=None):
+    """Return ``(q_alpha, q_beta, direct)`` for the XC response scalar.
+
+    The Q matrices differentiate MO coefficients; ``direct`` differentiates
+    AO centers on a fixed grid. An empty ``atmlst`` requests Q matrices only.
+    """
     mf = tdobj._scf
     xctype = mf._numint._xc_type(mf.xc)
     add_matrix, eval_matrix = _xc_matrix_builders(xctype)
@@ -648,7 +608,6 @@ def response_terms(
     if atmlst is None:
         atmlst = range(mol.natm)
     atmlst = tuple(atmlst)
-    _spaces, _amplitudes, densities, blocks, terms = channel_data
     pair_labels = tuple(
         label for label in densities
         if xctype != "LDA" and any(
@@ -665,7 +624,7 @@ def response_terms(
     reference_beta = np.zeros_like(reference_alpha)
     direct = np.zeros((len(atmlst), 3))
     mo = np.asarray(mf.mo_coeff)
-    density_alpha, density_beta = _reference_spin_densities(tdobj)
+    density_alpha, density_beta = reference_spin_densities(tdobj)
     density_labels, density_stack = _response_density_stack(
         densities, density_alpha, density_beta,
     )
@@ -758,8 +717,6 @@ def response_terms(
             mol, ao, reference_weights_beta * weights, mask,
         )
 
-        if not with_direct:
-            continue
         for k, atom in enumerate(atmlst):
             p0, p1 = offsets[atom][2:]
             for xyz in range(3):
@@ -792,13 +749,13 @@ def response_terms(
                     )
                 direct[k, xyz] += value
 
-    q_alpha, q_beta = _project_channel_potentials(
+    q_alpha, q_beta = project_channel_potentials(
         tdobj, potentials, blocks,
     )
     _add_reference_q(
         tdobj, q_alpha, q_beta, reference_alpha, reference_beta,
     )
-    return XCGradientTerms(q_alpha, q_beta, direct)
+    return q_alpha, q_beta, direct
 
 
 def _lda_eval_matrix(mol, ao, weights, mask):
@@ -822,9 +779,11 @@ def _xc_matrix_builders(xctype):
 
 
 def fockz_terms(
-        gradient_driver, tdobj, spaces, pz, atmlst=None,
-        with_direct=True):
-    """LDA/GGA/meta-GGA derivative of ``Pz:Fz`` excluding its explicit Pz projection."""
+        gradient_driver, tdobj, spaces, pz, atmlst=None):
+    """Return ``(q_alpha, q_beta, direct)`` for the XC part of ``Pz:Fz``.
+
+    The explicit Pz projection is already included by ``fock_projection_q``.
+    """
     mf = tdobj._scf
     xctype = mf._numint._xc_type(mf.xc)
     add_matrix, eval_matrix = _xc_matrix_builders(xctype)
@@ -841,7 +800,7 @@ def fockz_terms(
     reference_beta = np.zeros_like(reference_alpha)
     direct = np.zeros((len(atmlst), 3))
     mo = np.asarray(mf.mo_coeff)
-    density_alpha, density_beta = _reference_spin_densities(tdobj)
+    density_alpha, density_beta = reference_spin_densities(tdobj)
     density_stack = np.asarray((
         pz, density_open, density_alpha, density_beta,
     ))
@@ -875,8 +834,6 @@ def fockz_terms(
             mol, ao, lib.einsum("xyg,xyzg->zg", pair, kref_beta) * weights,
             mask,
         )
-        if not with_direct:
-            continue
         for k, atom in enumerate(atmlst):
             p0, p1 = offsets[atom][2:]
             derivative_batches = _hermitian_density_derivative_batches(
@@ -907,7 +864,7 @@ def fockz_terms(
     _add_reference_q(
         tdobj, q_alpha, q_beta, reference_alpha, reference_beta,
     )
-    return XCGradientTerms(q_alpha, q_beta, direct)
+    return q_alpha, q_beta, direct
 
 
 def nobeta_reference_q(tdobj, p0, max_memory=None):
@@ -924,7 +881,7 @@ def nobeta_reference_q(tdobj, p0, max_memory=None):
         max_memory = tdobj.max_memory
     ni = mf._numint
     mol = mf.mol
-    density_alpha, density_beta = _reference_spin_densities(tdobj)
+    density_alpha, density_beta = reference_spin_densities(tdobj)
     density0 = 0.5 * (density_alpha + density_beta)
     p0 = 0.5 * (np.asarray(p0) + np.asarray(p0).T)
     matrix_alpha = np.zeros((mol.nao_nr(), mol.nao_nr()))

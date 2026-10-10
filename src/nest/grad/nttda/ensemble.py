@@ -19,7 +19,7 @@ import numpy as np
 from pyscf import dft, lib
 from pyscf.scf import hf
 
-from .roks import finish_gradient, pack_m_matrix, _solve_zvector
+from .roks import pack_m_matrix, _solve_zvector
 
 
 def canonical_pairs(tdobj):
@@ -136,7 +136,6 @@ def solve_zvector(action, pairs, tdobj, rhs, tolerance=1e-12, max_cycle=None):
 
 __all__ = [
     "canonical_pairs",
-    "finish_gradient",
     "make_hessian_transpose_action",
     "pack_m_matrix",
     "solve_zvector",

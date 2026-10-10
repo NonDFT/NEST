@@ -12,92 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""ROKS transpose-Hessian adjoint and final NTTDA gradient assembly."""
-
-from dataclasses import dataclass
+"""ROKS orbital Hessian and Z-vector response for NTTDA gradients."""
 
 import numpy as np
 
 from pyscf import dft, lib
-from pyscf.grad import rhf as rhf_grad
-from nest.aocscf import AverageOccupationROKS, SymAdaptedAverageOccupationROKS
-
-
-
-@dataclass(frozen=True)
-class GradientComponents:
-    """Excitation-gradient pieces and the solved ROKS adjoint."""
-
-    m_matrix: np.ndarray
-    direct: np.ndarray
-    orbital: np.ndarray
-    total: np.ndarray
-    zvector: np.ndarray
-    residual: float
-
-
-def finish_gradient(
-        gradient_driver, tdobj, m_matrix, direct, atmlst,
-        tolerance, max_cycle, fock_direct, direct_fock_probes=None):
-    """Solve the common ROKS Z-vector equation and assemble ``d omega/dR``.
-
-    ``direct_fock_probes`` enables one batched Fock-derivative evaluation: its
-    contraction is the first result and the Z-vector contraction is the second.
-    """
-    if isinstance(tdobj._scf, (AverageOccupationROKS, SymAdaptedAverageOccupationROKS)):
-        from . import ensemble as response
-    else:
-        from . import roks as response
-    transpose_action, pairs = response.make_hessian_transpose_action(tdobj)
-    rhs = pack_m_matrix(m_matrix, pairs)
-    zvector = response.solve_zvector(
-        transpose_action,
-        pairs,
-        tdobj,
-        rhs,
-        tolerance=tolerance,
-        max_cycle=max_cycle,
-    )
-    adjoint = response.zvector_adjoint_matrix(tdobj, pairs, zvector)
-    residual = float(np.max(np.abs(pack_m_matrix(adjoint, pairs) - rhs), initial=0.0))
-    probe_alpha, probe_beta = response.zvector_probe_densities(
-        tdobj, pairs, zvector,
-    )
-    if direct_fock_probes is None:
-        fock_contraction = fock_direct(
-            gradient_driver,
-            tdobj,
-            probe_alpha,
-            probe_beta,
-            atmlst=atmlst,
-        )
-        direct_total = direct
-    else:
-        direct_alpha, direct_beta = direct_fock_probes
-        fock_contractions = fock_direct(
-            gradient_driver,
-            tdobj,
-            np.asarray((direct_alpha, probe_alpha)),
-            np.asarray((direct_beta, probe_beta)),
-            atmlst=atmlst,
-        )
-        direct_total = direct + fock_contractions[0]
-        fock_contraction = fock_contractions[1]
-    orbital = _orbital_gradient(
-        tdobj,
-        m_matrix,
-        adjoint,
-        fock_contraction,
-        atmlst=atmlst,
-    )
-    return GradientComponents(
-        m_matrix=m_matrix,
-        direct=direct_total,
-        orbital=orbital,
-        total=direct_total + orbital,
-        zvector=zvector,
-        residual=residual,
-    )
 
 
 def canonical_pairs(tdobj, compact=True):
@@ -278,29 +197,3 @@ def zvector_probe_densities(tdobj, pairs, zvector):
         mo @ source_alpha @ mo.conj().T,
         mo @ source_beta @ mo.conj().T,
     )
-
-
-def _orbital_gradient(
-        tdobj, m_matrix, adjoint, fock_contraction, atmlst=None):
-    mol = tdobj.mol
-    mf = tdobj._scf
-    if atmlst is None:
-        atmlst = range(mol.natm)
-    atmlst = tuple(atmlst)
-    mo = np.asarray(mf.mo_coeff)
-    overlap_derivative = rhf_grad.Gradients(mf).get_ovlp(mol)
-    offsets = mol.offset_nr_by_atom()
-    result = np.zeros((len(atmlst), 3))
-    for k, atom in enumerate(atmlst):
-        p0, p1 = offsets[atom][2:]
-        for xyz in range(3):
-            overlap = np.zeros((mol.nao_nr(), mol.nao_nr()))
-            overlap[p0:p1] += overlap_derivative[xyz, p0:p1]
-            overlap[:, p0:p1] += overlap_derivative[xyz, p0:p1].T
-            symmetric_kappa = -0.5 * (mo.conj().T @ overlap @ mo)
-            result[k, xyz] = (
-                -fock_contraction[k, xyz]
-                - np.trace(adjoint.T @ symmetric_kappa)
-                + np.trace(m_matrix @ symmetric_kappa)
-            )
-    return result

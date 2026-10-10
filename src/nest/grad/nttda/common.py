@@ -21,75 +21,9 @@ from dataclasses import dataclass
 
 import numpy as np
 from pyscf import dft, lib
-from pyscf.grad import rhf as rhf_grad
 from nest.nttda import nttda as nttda_mod
 from nest.aocscf import AverageOccupationROKS, SymAdaptedAverageOccupationROKS
 
-from . import xc as xc_backend
-from .xc import _reference_spin_densities
-from .roks import finish_gradient
-
-
-def assemble_gradient(
-        gradient_driver, tdobj, channel_data, probes, fock_q, response_q,
-        atmlst=None, tolerance=1e-12, max_cycle=None):
-    """Assemble channel projections, XC/J/K derivatives and the adjoint.
-
-    ``response_q`` contains only the hybrid/RSH part; semilocal response is
-    added here. The direct and Z-vector probes share one J/K derivative batch.
-    """
-    mf = tdobj._scf
-    xctype = mf._numint._xc_type(mf.xc)
-    atmlst = tuple(range(tdobj.mol.natm) if atmlst is None else atmlst)
-    spaces, _amplitudes, densities, _blocks, response_terms = channel_data
-    p0, pz = probes
-    fock_alpha, fock_beta = fock_q
-    response_alpha, response_beta = response_q
-    m_matrix = fock_alpha + fock_beta + response_alpha + response_beta
-    ledger = _JKDerivativeLedger()
-    slots = ("direct", "zvector")
-    direct = response_direct_hfx(
-        gradient_driver, tdobj, densities, response_terms,
-        atmlst=atmlst, jk_ledger=ledger, output_slot=slots[0],
-    )
-
-    # ROKS/HF includes Fz in the spin-resolved Fock probes. All other
-    # references use charge-only probes and differentiate Fz separately.
-    spin_fock = xctype == "HF" and not isinstance(mf, (AverageOccupationROKS, SymAdaptedAverageOccupationROKS))
-    direct_fock_probes = (
-        (0.5 * (p0 + pz), 0.5 * (p0 - pz)) if spin_fock
-        else (0.5 * p0, 0.5 * p0)
-    )
-    if xctype != "HF":
-        for terms in (
-                xc_backend.response_terms(gradient_driver, tdobj, channel_data, atmlst=atmlst),
-                xc_backend.fockz_terms(gradient_driver, tdobj, spaces, pz, atmlst=atmlst)):
-            m_matrix += terms.q_alpha + terms.q_beta
-            direct += terms.direct
-        common_alpha, common_beta = xc_backend.nobeta_reference_q(tdobj, p0)
-        m_matrix += common_alpha + common_beta
-    if not spin_fock:
-        terms = fockz_hfx_terms(
-            gradient_driver, tdobj, pz, atmlst=atmlst,
-            jk_ledger=ledger, output_slot=slots[0],
-        )
-        m_matrix += terms.q_alpha + terms.q_beta
-        direct += terms.direct
-
-    def fock_direct(driver, obj, p_alpha, p_beta, atmlst=None):
-        local = spin_fock_direct(
-            driver, obj, p_alpha, p_beta, atmlst=atmlst, nobeta_p0=p0,
-            jk_ledger=ledger, output_slots=slots,
-        )
-        contractions = ledger.contract(driver, obj.mol, atmlst, slots=slots)
-        for index, slot in enumerate(slots):
-            local[index] += contractions[slot]
-        return local
-
-    return finish_gradient(
-        gradient_driver, tdobj, m_matrix, direct, atmlst, tolerance,
-        max_cycle, fock_direct, direct_fock_probes=direct_fock_probes,
-    )
 
 @dataclass(frozen=True)
 class OrbitalSpaces:
@@ -113,9 +47,7 @@ def orbital_spaces(tdobj):
     occ = np.asarray(mf.mo_occ)
     if occ.ndim != 1:
         raise ValueError("NTTDA gradients require spatial ROKS orbitals")
-    closed = np.flatnonzero(occ == 2)
-    open_ = np.flatnonzero(occ == 1)
-    virtual = np.flatnonzero(occ == 0)
+    closed, open_, virtual = nttda_mod._orbital_indices(tdobj)
     coeff = np.asarray(mf.mo_coeff)
     return OrbitalSpaces(
         closed=closed,
@@ -298,46 +230,30 @@ def _density_key(density):
 
 
 @dataclass(frozen=True)
-class _JKDerivativeTerm:
-    """One fixed-AO bilinear derivative with a named output slot."""
+class JKDerivativeTerm:
+    """One fixed-AO bilinear derivative: probe 0 is direct, probe 1 is orbital."""
 
     left: np.ndarray
     right: np.ndarray
     scale: float
-    omega: float
-    slot: object
+    omega: float | None
+    probe: int = 0
 
 
-class _JKDerivativeLedger:
-    """Shared scheduler for fixed-AO J/K derivative contractions."""
+def contract_jk_derivatives(gradient_driver, mol, atoms, j_terms, k_terms):
+    """Contract both derivative lists into [direct, Z-vector] gradients.
 
-    def __init__(self):
-        self._terms = {"j": [], "k": []}
-
-    def add(self, operator, slot, terms):
-        self._terms[operator].extend(
-            _JKDerivativeTerm(left, right, scale, omega, slot)
-            for left, right, scale, omega in terms
-            if scale != 0.0
+    Range separation, density reuse and memory-limited batches are handled
+    here. Callers receive completed contractions; no terms are retained.
+    """
+    gradients = np.zeros((2, len(atoms), 3))
+    offsets = mol.offset_nr_by_atom()
+    for operator, terms in (("j", j_terms), ("k", k_terms)):
+        nonzero_terms = [term for term in terms if term.scale != 0.0]
+        _contract_derivative_terms(
+            gradients, gradient_driver, mol, atoms, offsets, nonzero_terms, operator,
         )
-
-    def contract(self, gradient_driver, mol, atoms, slots=()):
-        atoms = tuple(atoms)
-        shape = (len(atoms), 3)
-        gradients = {slot: np.zeros(shape) for slot in slots}
-        for operator in ("j", "k"):
-            for term in self._terms[operator]:
-                gradients.setdefault(term.slot, np.zeros(shape))
-            _contract_derivative_terms(
-                gradients,
-                gradient_driver,
-                mol,
-                atoms,
-                mol.offset_nr_by_atom(),
-                self._terms[operator],
-                operator,
-            )
-        return gradients
+    return gradients
 
 
 def _term_densities(term, exchange):
@@ -470,186 +386,44 @@ def _contract_derivative_terms(
                             left_derivative[:, p0:p1],
                             right[:, p0:p1],
                         )
-                    gradients[term.slot][k] += term.scale * value
+                    gradients[term.probe][k] += term.scale * value
 
 
-def _spin_probe_stacks(p_alpha, p_beta):
-    p_alpha = np.asarray(p_alpha)
-    p_beta = np.asarray(p_beta)
-    single_probe = p_alpha.ndim == 2
-    if single_probe:
-        p_alpha = p_alpha[None]
-        p_beta = p_beta[None]
-    return p_alpha, p_beta, single_probe
-
-
-def spin_fock_direct(
-        gradient_driver, tdobj, p_alpha, p_beta, atmlst=None,
-        nobeta_p0=None, jk_ledger=None, output_slots=None):
-    """Differentiate one or more HF/DFT spin Fock scalar probes.
-
-    The optional ``nobeta_p0`` correction belongs to the first, explicit-direct
-    probe in the batch.
-    """
+def response_jk_terms(tdobj, densities, response_terms):
+    """Build explicit J/K derivative terms for the channel response scalar."""
     mf = tdobj._scf
-    mol = tdobj.mol
-    if atmlst is None:
-        atmlst = range(mol.natm)
-    atmlst = tuple(atmlst)
-    p_alpha, p_beta, single_probe = _spin_probe_stacks(
-        p_alpha, p_beta,
-    )
-    if output_slots is None:
-        output_slots = tuple(range(len(p_alpha)))
-    p_total = p_alpha + p_beta
-    density_alpha, density_beta = _reference_spin_densities(tdobj)
-    gradient = np.zeros((len(p_alpha), len(atmlst), 3))
-    hcore_derivative = rhf_grad.Gradients(mf).hcore_generator(mol)
-    for k, atom in enumerate(atmlst):
-        gradient[:, k] += lib.einsum(
-            "npq,xpq->nx", p_total, hcore_derivative(atom),
-        )
     ni = mf._numint
-    omega, alpha, hybrid = ni.rsh_and_hybrid_coeff(mf.xc, mol.spin)
-    local_ledger = _JKDerivativeLedger()
-    ledger = jk_ledger if jk_ledger is not None else local_ledger
-    for probe in range(len(p_alpha)):
-        j_terms = [
-            (p_total[probe], density_alpha, 1.0, None),
-            (p_total[probe], density_beta, 1.0, None),
-        ]
-        k_terms = []
-        if ni.libxc.is_hybrid_xc(mf.xc):
-            k_terms.extend((
-                (p_alpha[probe], density_alpha, -hybrid, None),
-                (p_beta[probe], density_beta, -hybrid, None),
-            ))
-            if omega != 0:
-                long_range = -(alpha - hybrid)
-                k_terms.extend((
-                    (p_alpha[probe], density_alpha, long_range, omega),
-                    (p_beta[probe], density_beta, long_range, omega),
-                ))
-        ledger.add("j", output_slots[probe], j_terms)
-        ledger.add("k", output_slots[probe], k_terms)
-    xctype = ni._xc_type(mf.xc)
-    if xctype != "HF":
-        if xctype == "LDA":
-            derivative_contractor = xc_backend.contract_lda_vxc_derivative
-        elif xctype == "GGA":
-            derivative_contractor = xc_backend.contract_gga_vxc_derivative
-        elif xctype == "MGGA":
-            derivative_contractor = xc_backend.contract_mgga_vxc_derivative
-        else:
-            raise NotImplementedError(
-                "ordinary Fock direct derivative is not implemented for %s" %
-                xctype
-            )
-        if (nobeta_p0 is not None and tdobj.nobeta
-                and not isinstance(mf, (AverageOccupationROKS, SymAdaptedAverageOccupationROKS))):
-            density0 = 0.5 * (density_alpha + density_beta)
-            actual_probe_alpha = np.array(p_alpha, copy=True)
-            actual_probe_beta = np.array(p_beta, copy=True)
-            actual_probe_alpha[0] -= 0.5 * nobeta_p0
-            actual_probe_beta[0] -= 0.5 * nobeta_p0
-        else:
-            density0 = None
-            actual_probe_alpha = p_alpha
-            actual_probe_beta = p_beta
-        gradient += derivative_contractor(
-            mf,
-            density_alpha,
-            density_beta,
-            actual_probe_alpha,
-            actual_probe_beta,
-            atmlst=atmlst,
-            max_memory=gradient_driver.max_memory,
-        )
-        if density0 is not None:
-            gradient[0] += derivative_contractor(
-                mf,
-                density0,
-                density0,
-                0.5 * nobeta_p0,
-                0.5 * nobeta_p0,
-                atmlst=atmlst,
-                max_memory=gradient_driver.max_memory,
-            )
-    if jk_ledger is None:
-        contractions = local_ledger.contract(
-            gradient_driver, mol, atmlst, slots=output_slots,
-        )
-        for probe, slot in enumerate(output_slots):
-            gradient[probe] += contractions[slot]
-    return gradient[0] if single_probe else gradient
-
-
-def response_direct_hfx(
-        gradient_driver, tdobj, densities, response_terms, atmlst=None,
-        jk_ledger=None, output_slot=0):
-    """J/K skeleton derivative for a channel response-term ledger."""
-    mol = tdobj.mol
-    if atmlst is None:
-        atmlst = range(mol.natm)
-    atmlst = tuple(atmlst)
-    gradient = np.zeros((len(atmlst), 3))
-    ni = tdobj._scf._numint
-    omega, alpha, hybrid = ni.rsh_and_hybrid_coeff(
-        tdobj._scf.xc, mol.spin,
-    )
-    if not ni.libxc.is_hybrid_xc(tdobj._scf.xc):
-        return gradient
-
+    if not ni.libxc.is_hybrid_xc(mf.xc):
+        return [], []
+    omega, alpha, hybrid = ni.rsh_and_hybrid_coeff(mf.xc, mf.mol.spin)
     scales = [(hybrid, None)]
     if omega != 0:
         scales.append((alpha - hybrid, omega))
-    j_terms = []
-    k_terms = []
+    j_terms, k_terms = [], []
     for term in response_terms:
-        target = densities[term.target]
-        source = densities[term.source]
+        target, source = densities[term.target], densities[term.source]
         for coefficient, range_omega in scales:
             if term.vref0:
-                k_terms.append((
-                    target,
-                    source,
-                    -coefficient * term.vref0,
-                    range_omega,
+                k_terms.append(JKDerivativeTerm(
+                    target, source, -coefficient * term.vref0, range_omega,
                 ))
             if term.vref1:
-                j_terms.append((
-                    target,
-                    source,
-                    -coefficient * term.vref1,
-                    range_omega,
+                j_terms.append(JKDerivativeTerm(
+                    target, source, -coefficient * term.vref1, range_omega,
                 ))
-    local_ledger = _JKDerivativeLedger()
-    ledger = jk_ledger if jk_ledger is not None else local_ledger
-    ledger.add("j", output_slot, j_terms)
-    ledger.add("k", output_slot, k_terms)
-    if jk_ledger is None:
-        gradient += local_ledger.contract(
-            gradient_driver, mol, atmlst, slots=(output_slot,),
-        )[output_slot]
-    return gradient
+    return j_terms, k_terms
 
 
-def fockz_hfx_terms(
-        gradient_driver, tdobj, pz, atmlst=None, with_direct=True,
-        jk_ledger=None, output_slot=0):
-    """Differentiate ``-1/2 Pz:K(D_OO)`` excluding the Pz projection."""
+def fockz_hfx_terms(tdobj, pz):
+    """Return MO derivatives and K terms of ``-1/2 Pz:K(D_OO)``."""
     mf = tdobj._scf
     mol = mf.mol
     ni = mf._numint
-    if atmlst is None:
-        atmlst = range(mol.natm)
-    atmlst = tuple(atmlst)
     mo = np.asarray(mf.mo_coeff)
     q_alpha = np.zeros((mo.shape[1], mo.shape[1]))
     q_beta = np.zeros_like(q_alpha)
-    direct = np.zeros((len(atmlst), 3))
     if not ni.libxc.is_hybrid_xc(mf.xc):
-        return xc_backend.XCGradientTerms(q_alpha, q_beta, direct)
+        return q_alpha, q_beta, []
 
     spaces = orbital_spaces(tdobj)
     density_open = spaces.c_open @ spaces.c_open.T
@@ -670,22 +444,10 @@ def fockz_hfx_terms(
         q_alpha[:, spaces.open] -= 0.5 * coefficient * (
             mo.conj().T @ (potential + potential.T) @ spaces.c_open
         )
-        if with_direct:
-            k_terms.append((
-                pz,
-                density_open,
-                -0.5 * coefficient,
-                range_omega,
-            ))
-    if with_direct:
-        local_ledger = _JKDerivativeLedger()
-        ledger = jk_ledger if jk_ledger is not None else local_ledger
-        ledger.add("k", output_slot, k_terms)
-        if jk_ledger is None:
-            direct += local_ledger.contract(
-                gradient_driver, mol, atmlst, slots=(output_slot,),
-            )[output_slot]
-    return xc_backend.XCGradientTerms(q_alpha, q_beta, direct)
+        k_terms.append(JKDerivativeTerm(
+            pz, density_open, -0.5 * coefficient, range_omega,
+        ))
+    return q_alpha, q_beta, k_terms
 
 
 def fock_probes(tdobj, projections):
@@ -747,12 +509,40 @@ def response_potentials(densities, vref0, vref1, terms):
     return potentials
 
 
-def response_projection_q(tdobj, channel_data, max_memory=None, hfx_only=False):
-    """MO derivative of the response at fixed kernels, for either channel."""
-    _spaces, _amplitudes, densities, blocks, terms = channel_data
-    if hfx_only:
-        vref0, vref1 = _apply_hfx_responses(tdobj, densities)
-    else:
-        vref0, vref1 = _apply_reference_responses(tdobj, densities, max_memory)
+def hfx_response_q(tdobj, densities, blocks, terms):
+    """MO derivative of the hybrid/RSH response at fixed kernels."""
+    vref0, vref1 = _apply_hfx_responses(tdobj, densities)
     potentials = response_potentials(densities, vref0, vref1, terms)
-    return xc_backend._project_channel_potentials(tdobj, potentials, blocks)
+    return project_channel_potentials(tdobj, potentials, blocks)
+
+
+def project_channel_potentials(tdobj, potentials, blocks):
+    """Project transition-factor potentials for any NTTDA spin channel."""
+    mo = np.asarray(tdobj._scf.mo_coeff)
+    q_alpha = np.zeros((mo.shape[1], mo.shape[1]))
+    q_beta = np.zeros_like(q_alpha)
+    for label, (target, source, coefficient) in blocks.items():
+        potential = mo.conj().T @ potentials[label] @ mo
+        q_beta[:, target] += potential[:, source] @ coefficient.T
+        q_alpha[:, source] += potential[target, :].T @ coefficient
+    return q_alpha, q_beta
+
+def reference_spin_densities(tdobj):
+    """Spin densities of the variational reference used by the XC kernel."""
+    mf = tdobj._scf
+    mo = np.asarray(mf.mo_coeff)
+    if isinstance(mf, (AverageOccupationROKS, SymAdaptedAverageOccupationROKS)):
+        density = (mo * mf.mo_occ) @ mo.conj().T
+        return 0.5 * density, 0.5 * density
+    return (
+        mo[:, mf.mo_occ > 0] @ mo[:, mf.mo_occ > 0].T,
+        mo[:, mf.mo_occ == 2] @ mo[:, mf.mo_occ == 2].T,
+    )
+
+def reference_spin_occupations(tdobj):
+    """Per-orbital alpha/beta occupations of the reference density."""
+    mf = tdobj._scf
+    occupation = np.asarray(mf.mo_occ)
+    if isinstance(mf, (AverageOccupationROKS, SymAdaptedAverageOccupationROKS)):
+        return 0.5 * occupation, 0.5 * occupation
+    return (occupation > 0).astype(float), (occupation == 2).astype(float)
