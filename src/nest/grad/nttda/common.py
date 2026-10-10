@@ -70,17 +70,10 @@ class FockProjection:
 
     name: str
     left_indices: np.ndarray
-    left_orbitals: np.ndarray
     coefficient: np.ndarray
     right_indices: np.ndarray
-    right_orbitals: np.ndarray
     weight_f0: float
     weight_fz: float
-
-    def density(self):
-        return pair_density(
-            self.left_orbitals, self.coefficient, self.right_orbitals,
-        )
 
 
 def _fock_response_q(tdobj, p_alpha, p_beta):
@@ -298,20 +291,8 @@ def _jk_derivative_potentials(
             densities.setdefault(_density_key(density), density)
     keys = tuple(densities)
     stack = np.asarray([densities[key] for key in keys])
-    if operator == "j":
-        if omega is None:
-            values = gradient_driver.get_j(mol, stack, hermi=0)
-        else:
-            values = gradient_driver.get_j(
-                mol, stack, hermi=0, omega=omega,
-            )
-    else:
-        if omega is None:
-            values = gradient_driver.get_k(mol, stack, hermi=0)
-        else:
-            values = gradient_driver.get_k(
-                mol, stack, hermi=0, omega=omega,
-            )
+    get_potential = gradient_driver.get_j if operator == "j" else gradient_driver.get_k
+    values = get_potential(mol, stack, hermi=0, omega=omega)
     values = _as_derivative_stack(values)
     return dict(zip(keys, values))
 
@@ -452,10 +433,13 @@ def fockz_hfx_terms(tdobj, pz):
 
 def fock_probes(tdobj, projections):
     """AO probes of the explicit F0/Fz scalar for either spin channel."""
+    mo = np.asarray(tdobj._scf.mo_coeff)
     p0 = np.zeros((tdobj.mol.nao_nr(), tdobj.mol.nao_nr()))
     pz = np.zeros_like(p0)
     for term in projections:
-        density = term.density()
+        density = pair_density(
+            mo[:, term.left_indices], term.coefficient, mo[:, term.right_indices],
+        )
         p0 += term.weight_f0 * density
         pz += term.weight_fz * density
     return p0, pz

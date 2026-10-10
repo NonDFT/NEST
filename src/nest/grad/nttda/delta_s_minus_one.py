@@ -140,34 +140,27 @@ def spin_lowering_fock0_fockz(tdobj, max_memory=None):
 def spin_lowering_fock_projections(tdobj, xy):
     """Complete explicit-Fock ledger of ``X.T A_sfd X``."""
     spaces, (co, cv, oo, ov) = split_spin_lowering(tdobj, xy)
-    c = spaces.c_closed
-    o = spaces.c_open
-    v = spaces.c_virtual
     block_data = (
         ("C", "O", co),
         ("C", "V", cv),
         ("O", "O", oo),
         ("O", "V", ov),
     )
-    orbital_data = {
-        "C": (spaces.closed, c),
-        "O": (spaces.open, o),
-        "V": (spaces.virtual, v),
+    orbital_indices = {
+        "C": spaces.closed,
+        "O": spaces.open,
+        "V": spaces.virtual,
     }
     terms = []
 
     def add(name, left_label, coefficient, right_label, f0, fz):
-        left_indices, left_orbitals = orbital_data[left_label]
-        right_indices, right_orbitals = orbital_data[right_label]
         coefficient = np.asarray(coefficient)
         if coefficient.size:
             terms.append(FockProjection(
                 name=name,
-                left_indices=left_indices,
-                left_orbitals=left_orbitals,
+                left_indices=orbital_indices[left_label],
                 coefficient=coefficient,
-                right_indices=right_indices,
-                right_orbitals=right_orbitals,
+                right_indices=orbital_indices[right_label],
                 weight_f0=float(f0),
                 weight_fz=float(fz),
             ))

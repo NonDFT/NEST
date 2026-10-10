@@ -12,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Analytic nuclear gradients for :mod:`nest.nttda`."""
+"""Public gradient driver, scanner and finite differences for :mod:`nest.nttda`.
+
+Analytic channel coefficients live in ``delta_s_zero``/``delta_s_minus_one``;
+``driver.assemble_gradient`` performs the common derivative assembly.
+"""
 
 import numpy as np
 
@@ -162,7 +166,7 @@ class Gradients(rhf_grad.GradientsBase):
             log.info("finite-difference step = %.6g Bohr", self.step)
         return self
 
-    def grad_nuc(self, atmlst=None):
+    def _reference_gradient(self, atmlst=None):
         """Ground-state reference gradient, including nuclear repulsion."""
         if atmlst is not None:
             atmlst = list(atmlst)
@@ -171,6 +175,10 @@ class Gradients(rhf_grad.GradientsBase):
             de = reference_gradient.kernel()
             return de if atmlst is None else de[atmlst]
         return reference_gradient.kernel(atmlst=atmlst)
+
+    # Preserve the historical NTTDA API: grad_nuc includes the electronic
+    # reference gradient, while grad_elec below means d(omega)/dR.
+    grad_nuc = _reference_gradient
 
     def _analytic_components(self, xy, atmlst):
         tdobj = self.base
@@ -194,13 +202,15 @@ class Gradients(rhf_grad.GradientsBase):
             )
         raise ValueError("deltaS must be -1, 0, or 1")
 
-    def grad_elec(self, xy, atmlst=None):
+    def _excitation_gradient(self, xy, atmlst=None):
         """Return the analytic excitation-energy derivative ``d omega/dR``."""
         if atmlst is None:
             atmlst = range(self.mol.natm)
         components = self._analytic_components(xy, tuple(atmlst))
         self.nttda_details = components
         return components.total
+
+    grad_elec = _excitation_gradient
 
     def _energy_at(self, coords, reference_amplitude):
         mol = self.mol.copy()
@@ -291,7 +301,8 @@ class Gradients(rhf_grad.GradientsBase):
             excitation = self.grad_elec(
                 self.base.xy[self.state - 1], atmlst=calculation_atoms,
             )
-            result = self.grad_nuc(atmlst=calculation_atoms) + excitation
+            reference = self.grad_nuc(atmlst=calculation_atoms)
+            result = reference + excitation
         elif self.method == "finite_diff":
             result = self._finite_difference(calculation_atoms)
         else:

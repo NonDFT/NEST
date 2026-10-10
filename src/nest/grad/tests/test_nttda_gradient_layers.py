@@ -129,6 +129,21 @@ def frozen_scalar_at(base_mf, tdobj, xy, coords):
 
 
 class GradientLayerChecks(unittest.TestCase):
+    def test_jk_batching_preserves_gradients_with_small_memory(self):
+        mf = make_reference(make_molecule(), "CAM-B3LYP")
+        for delta_s in (-1, 0):
+            with self.subTest(delta_s=delta_s):
+                tdobj, xy = exact_state_two(mf, delta_s, nobeta=True)
+                driver = mf.nuc_grad_method()
+                builder = lowering_grad_elec if delta_s == -1 else same_spin_grad_elec
+                expected = builder(driver, tdobj, xy)
+                # Force multiple J/K batches, including range-separated terms.
+                driver.max_memory = 0.01
+                actual = builder(driver, tdobj, xy)
+                np.testing.assert_allclose(actual.direct, expected.direct, atol=1e-9, rtol=0)
+                np.testing.assert_allclose(actual.orbital, expected.orbital, atol=1e-9, rtol=0)
+                np.testing.assert_allclose(actual.total, expected.total, atol=1e-9, rtol=0)
+
     def test_batched_jk_and_shared_vxc_call_counts(self):
         mf = make_reference(make_molecule(), "CAM-B3LYP")
         for delta_s in (-1, 0):

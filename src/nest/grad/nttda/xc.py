@@ -340,12 +340,6 @@ def _xc_density(ni, mol, ao, density, mask, xctype, hermi=1):
     return rho[None] if rho.ndim == 1 else rho
 
 
-def _xc_ao_center_derivative(ao, p0, p1, xyz, xctype):
-    return _compact_ao_center_derivative(
-        ao, p0, p1, xyz, xctype,
-    )
-
-
 def _xc_density_derivatives(
         ao, densities, p0, p1, xctype, ao_center_derivative):
     """AO-center derivatives for a stack of probe/reference densities."""
@@ -441,7 +435,7 @@ def _response_density_stack(
 def _response_density_derivatives(
         ao, density_stack, labels, p0, p1, xyz, xctype):
     """Generate every channel/reference density derivative from one AO delta."""
-    ao_center_derivative = _xc_ao_center_derivative(
+    ao_center_derivative = _compact_ao_center_derivative(
         ao, p0, p1, xyz, xctype,
     )
     derivatives = _xc_density_derivatives(
@@ -508,7 +502,7 @@ def _contract_vxc_derivative(
         for k, atom in enumerate(atmlst):
             p0, p1 = offsets[atom][2:]
             for xyz in range(3):
-                ao_center_derivative = _xc_ao_center_derivative(
+                ao_center_derivative = _compact_ao_center_derivative(
                     ao, p0, p1, xyz, xctype,
                 )
                 density_derivative = _xc_density_derivatives(

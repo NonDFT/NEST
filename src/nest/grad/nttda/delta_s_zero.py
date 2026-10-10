@@ -108,9 +108,7 @@ def same_spin_fock_projections(tdobj, xy):
     """Return the complete five-block explicit-Fock ledger."""
     spaces, (co, cv, oo, ov, cv0) = split_same_spin(tdobj, xy)
     spin = spaces.spin
-    c = spaces.c_closed
-    o = spaces.c_open
-    v = spaces.c_virtual
+    c, o, v = spaces.closed, spaces.open, spaces.virtual
     a = np.sqrt((spin + 1.0) / (2.0 * spin))
     b = np.sqrt(2.0 * (spin + 1.0) / spin)
     d = np.sqrt((spin + 1.0) / spin)
@@ -118,23 +116,11 @@ def same_spin_fock_projections(tdobj, xy):
 
     terms = []
 
-    def indices(orbitals):
-        if orbitals is c:
-            return spaces.closed
-        if orbitals is o:
-            return spaces.open
-        if orbitals is v:
-            return spaces.virtual
-        raise ValueError("Fock projection uses an unknown orbital space")
-
     def add(name, left, coefficient, right, f0, fz):
         coefficient = np.asarray(coefficient)
         if coefficient.size:
             terms.append(FockProjection(
-                name,
-                indices(left), left, coefficient,
-                indices(right), right,
-                float(f0), float(fz),
+                name, left, coefficient, right, float(f0), float(fz),
             ))
 
     # CO row/column and its couplings.

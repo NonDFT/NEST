@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 import nest
-from pyscf import dft, gto
+from pyscf import dft, gto, lib
 from nest.nttda import NTTDA
 
 
@@ -39,6 +39,9 @@ from nest.grad.nttda.delta_s_minus_one import (  # noqa: E402
 class SameSpinScalarClosure(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # Keep 1e-11 closure checks independent of parallel integral reductions.
+        cls.addClassCleanup(lib.num_threads, lib.num_threads())
+        lib.num_threads(1)
         cls.mol = gto.M(
             atom="N 0 0 0; O 0 0 1.20; H 0 0.90 -0.20",
             basis="sto-3g",

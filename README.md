@@ -132,6 +132,37 @@ nt = roks.NTTDA()
 
 See [`examples`](examples) for complete calculations.
 
+## Developing NTTDA gradients
+
+Start with [`grad/nttda/driver.py`](src/nest/grad/nttda/driver.py), which assembles
+the excitation gradient in order: MO derivatives, the Z-vector solve, batched
+J/K contractions, and overlap response. The total gradient adds the reference
+gradient in [`grad/nttda/__init__.py`](src/nest/grad/nttda/__init__.py).
+
+- `delta_s_zero.py` and `delta_s_minus_one.py` contain channel-specific amplitude
+  blocks and Fock/response coefficients. Amplitude layouts are shared with the
+  energy module's `_split_amplitudes` helper.
+- `common.py` contains orbital partitions, projections, reference densities,
+  and J/K contraction helpers. Its term records hold data; contraction is explicit.
+- `roks.py` and `ensemble.py` implement the reference-specific orbital response.
+- `xc.py` contains fixed-grid XC quadrature and returns MO and nuclear derivatives.
+
+For compatibility, the NTTDA driver's `grad_nuc()` still returns the **full
+reference gradient**, and `grad_elec()` returns the **excitation-energy gradient**.
+Their implementations are named `_reference_gradient` and `_excitation_gradient`
+to make this decomposition explicit. `kernel()` and the scanner retain their
+total-energy convention.
+
+Run the gradient regressions with:
+
+```bash
+OMP_NUM_THREADS=2 python -m pytest src/nest/grad/tests/test_nttda*.py -q
+```
+
+These cover scalar closure, orbital and nuclear finite differences, both
+reference types, and J/K batching. The strict scalar-closure tests temporarily
+use one OpenMP thread to avoid reduction-order noise, without changing tolerances.
+
 ## License
 
 NEST is released under the Apache License 2.0.

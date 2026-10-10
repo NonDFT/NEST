@@ -118,6 +118,25 @@ class NTTDAGradientAcceptance(unittest.TestCase):
         tdobj = NTTDA(mf).set(max_memory=64)
         self.assertEqual(tdobj.Gradients().max_memory, 64)
 
+    def test_gradient_parts_and_scanner_keep_total_energy_convention(self):
+        tdobj = self.make_td("HF", delta_s=0)
+        gradient = tdobj.Gradients()
+        reference = gradient.kernel(state=0)
+        total = gradient.kernel(state=2)
+        np.testing.assert_allclose(gradient.grad_nuc(), reference, atol=1e-10, rtol=0)
+        np.testing.assert_allclose(
+            gradient.grad_elec(tdobj.xy[1]) + reference, total, atol=1e-10, rtol=0,
+        )
+        scanner = gradient.as_scanner(state=2)
+        energy, scanned = scanner(tdobj.mol.copy())
+        self.assertTrue(scanner.converged)
+        self.assertAlmostEqual(energy, tdobj.e_tot[1], places=8)
+        np.testing.assert_allclose(scanned, total, atol=1e-8, rtol=0)
+        energy, scanned = scanner(tdobj.mol.copy(), state=0)
+        self.assertTrue(scanner.converged)
+        self.assertAlmostEqual(energy, tdobj._scf.e_tot, places=8)
+        np.testing.assert_allclose(scanned, reference, atol=1e-8, rtol=0)
+
     def test_gradient_without_independent_orbital_rotations(self):
         mol = gto.M(
             atom="H 0 0 0; H 0 0 1.4", basis="sto-3g",
