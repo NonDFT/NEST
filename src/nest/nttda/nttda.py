@@ -975,6 +975,13 @@ class NTTDA(TDBase):
 
     Gradients = nuc_grad_method
 
+    def NAC(self):
+        """Return nonadiabatic couplings between roots in this spin channel."""
+        from nest.nac.nttda import NAC
+        return NAC(self)
+
+    nac_method = NAC
+
     def dump_flags(self, verbose=None):
         TDBase.dump_flags(self, verbose)
         log = logger.new_logger(self, verbose)

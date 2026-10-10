@@ -162,12 +162,30 @@ def assemble_gradient(
     )
 
 
-def _spin_fock_terms(gradient_driver, tdobj, p_alpha, p_beta, atmlst, nobeta_p0):
-    """Return hcore/XC derivatives and the J/K terms for two Fock probes.
+def reference_fock_derivative(derivative_driver, tdobj, p_alpha, p_beta, atmlst):
+    """Contract the nuclear derivative of the reference Focks with one probe.
 
-    Probe 0 is the explicit excitation derivative; probe 1 is the Z-vector.
-    The nobeta correction belongs only to probe 0. J/K contraction is left
-    to the caller so these terms can share a batch with the response terms.
+    Unlike the excitation F0 probe, an orbital-response probe always uses
+    the actual SCF reference, including when NTTDA's ``nobeta`` is enabled.
+    """
+    direct, j_terms, k_terms = _spin_fock_terms(
+        derivative_driver,
+        tdobj,
+        p_alpha[None],
+        p_beta[None],
+        atmlst,
+    )
+    jk = common.contract_jk_derivatives(derivative_driver, tdobj.mol, atmlst, j_terms, k_terms)
+    return direct[0] + jk[0]
+
+
+def _spin_fock_terms(gradient_driver, tdobj, p_alpha, p_beta, atmlst, nobeta_p0=None):
+    """Return hcore/XC derivatives and the J/K terms for Fock probes.
+
+    The gradient supplies [explicit, Z-vector] probes. If ``nobeta_p0`` is
+    given, its excitation correction belongs only to probe 0; reference-only
+    callers omit it. J/K contraction is left to the caller so these terms
+    can share a batch with the response terms.
     """
     mf = tdobj._scf
     mol = tdobj.mol
@@ -216,7 +234,11 @@ def _spin_fock_terms(gradient_driver, tdobj, p_alpha, p_beta, atmlst, nobeta_p0)
             derivative_contractor = xc.contract_mgga_vxc_derivative
         else:
             raise NotImplementedError('ordinary Fock direct derivative is not implemented for %s' % xctype)
-        if tdobj.nobeta and not isinstance(mf, (AverageOccupationROKS, SymAdaptedAverageOccupationROKS)):
+        if (
+            nobeta_p0 is not None
+            and tdobj.nobeta
+            and not isinstance(mf, (AverageOccupationROKS, SymAdaptedAverageOccupationROKS))
+        ):
             density0 = 0.5 * (density_alpha + density_beta)
             actual_probe_alpha = np.array(p_alpha, copy=True)
             actual_probe_beta = np.array(p_beta, copy=True)
