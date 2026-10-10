@@ -23,7 +23,7 @@ It is built on top of the PySCF electronic structure package.
 Noncollinear TDDFT         Noncollinear SF-TDDFT      Noncollinear Tensor TDA
                                    ├── Gradients            ├── Gradients
                                    ├── Oscillator strengths ├── Oscillator strengths
-                                   ├── NADC                 ├── NADC (in progress)
+                                   ├── NADC                 ├── NADC
                                    └── SOC                  └── SOC
 ```
 
@@ -53,7 +53,7 @@ Noncollinear TDDFT         Noncollinear SF-TDDFT      Noncollinear Tensor TDA
   - Analytic gradients for ΔS = −1, 0, and +1 on ROKS and average-occupation ROKS (AOCSCF) references
   - Finite-difference gradients for all three spin channels
   - Oscillator strengths
-  - NADC *(in progress)*
+  - Analytic NADC between roots in each of the ΔS = −1, 0, and +1 channels
   - SOC
 
   `td.Gradients().kernel(state=n)` returns the gradient of the selected total
@@ -63,6 +63,25 @@ Noncollinear TDDFT         Noncollinear SF-TDDFT      Noncollinear Tensor TDA
   use fixed grids by default. Density fitting, X2C, solvent response, and NLC
   are not supported by the NTTDA gradient driver.
   See the [AOCSCF gradient example](examples/nttda/02_nttda_aocscf_grad.py).
+
+  For nonadiabatic couplings, use two **one-based NTTDA root indices** in
+  the same spin channel (a root may describe a low-spin ground state):
+
+  ```python
+  nac = td.NAC()  # also td.nac_method()
+  d12 = nac.kernel(state_I=1, state_J=2, ediff=True)  # derivative coupling, 1/Bohr
+  n12 = nac.kernel(ediff=False)  # (omega_2 - omega_1) * d12, Eh/Bohr
+  check = nac.finite_difference(1, 2, atmlst=[0])  # full AWF-overlap check, 1/Bohr
+  ```
+
+  The default is the full spin-adapted auxiliary-wavefunction coupling,
+  including AO motion and reference orbital relaxation. `use_etfs=True`
+  removes the antisymmetric AO term and retains orbital relaxation.
+  Couplings use the phases of `td.xy`; finite differences match displaced
+  roots by wavefunction overlap. The driver requires real orbitals and
+  converged roots, guards division by a vanishing gap, and shares the
+  gradient driver's reference and response limitations. Cross-channel
+  couplings and NAC scanners are not implemented.
 
 
 ## Authors
@@ -168,6 +187,26 @@ PYTHONPATH=src OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
 These cover scalar closure, orbital and nuclear finite differences, both
 reference types, and J/K batching. The strict scalar-closure tests temporarily
 use one OpenMP thread to avoid reduction-order noise, without changing tolerances.
+
+## Developing NTTDA nonadiabatic couplings
+
+[`nac/nttda.py`](src/nest/nac/nttda.py) combines polarized excitation gradients
+with the existing NTTDA transition density. Only the finite-difference checker
+uses the explicit determinant expansion in
+[`_nttda_overlap.py`](src/nest/nac/_nttda_overlap.py).
+The [NAC derivation](docs/derivations/nttda_nac.md) explains the three spin
+channels, the CV(0) phase, and why the ETF option retains orbital response.
+
+Run the NAC regressions with:
+
+```bash
+PYTHONPATH=src OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+  python -m pytest src/nest/nac/tests/test_nttda.py -q
+```
+
+These compare analytic couplings with independent cross-geometry wavefunction
+overlaps on ROKS and AOCSCF references, and check spin adaptation, phases,
+pair exchange, atom selection, gap scaling, and input validation.
 
 ## License
 
