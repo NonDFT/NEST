@@ -182,6 +182,14 @@ class AOCSCFFiniteDifferenceGradient(unittest.TestCase):
             (0, "CAM-B3LYP", False),
             (-1, "PBE", False),
             (-1, "M06-2X", True),
+            (1, "HF", False),
+            (1, "SVWN", False),
+            (1, "PBE", False),
+            (1, "TPSS", False),
+            (1, "M06-2X", False),
+            (1, "M06-2X", True),
+            (1, "CAM-B3LYP", False),
+            (1, "CAM-B3LYP", True),
         )
         for delta_s, xc, nobeta in cases:
             with self.subTest(deltaS=delta_s, xc=xc, nobeta=nobeta):

@@ -34,11 +34,21 @@ from nest.grad.nttda.delta_s_zero import (  # noqa: E402
     grad_elec as same_spin_grad_elec,
     same_spin_ledger_scalar,
 )
+from nest.grad.nttda.delta_s_plus_one import (
+    grad_elec as raising_grad_elec,
+    spin_raising_ledger_scalar,
+)
 from nest.grad.nttda import xc as xc_backend  # noqa: E402
 from nest.nttda import NTTDA  # noqa: E402
 
 
 FUNCTIONALS = ("HF", "SVWN", "PBE", "TPSS", "M06-2X", "CAM-B3LYP")
+GRADIENT_BUILDERS = {-1: lowering_grad_elec, 0: same_spin_grad_elec, 1: raising_grad_elec}
+CHANNEL_SCALARS = {
+    -1: spin_lowering_ledger_scalar,
+    0: same_spin_ledger_scalar,
+    1: spin_raising_ledger_scalar,
+}
 
 
 def make_molecule():
@@ -76,6 +86,8 @@ def exact_state_two(mf, delta_s, nobeta):
     )
     if delta_s == 0:
         vind, diagonal = tdobj.gen_vind_sc()
+    elif delta_s == 1:
+        vind, diagonal = tdobj.gen_vind_sfu()
     else:
         vind, diagonal = tdobj.gen_vind_sfd()
     size = diagonal.size
@@ -99,14 +111,12 @@ def exact_state_two(mf, delta_s, nobeta):
 
 
 def gradient_components(mf, tdobj, xy, atmlst):
-    builder = lowering_grad_elec if tdobj.deltaS == -1 else same_spin_grad_elec
+    builder = GRADIENT_BUILDERS[tdobj.deltaS]
     return builder(mf.nuc_grad_method(), tdobj, xy, atmlst=atmlst)
 
 
 def channel_scalar(tdobj, xy):
-    if tdobj.deltaS == -1:
-        return spin_lowering_ledger_scalar(tdobj, xy)
-    return same_spin_ledger_scalar(tdobj, xy)
+    return CHANNEL_SCALARS[tdobj.deltaS](tdobj, xy)
 
 
 def frozen_scalar_at(base_mf, tdobj, xy, coords):
@@ -131,11 +141,11 @@ def frozen_scalar_at(base_mf, tdobj, xy, coords):
 class GradientLayerChecks(unittest.TestCase):
     def test_jk_batching_preserves_gradients_with_small_memory(self):
         mf = make_reference(make_molecule(), "CAM-B3LYP")
-        for delta_s in (-1, 0):
+        for delta_s in (-1, 0, 1):
             with self.subTest(delta_s=delta_s):
                 tdobj, xy = exact_state_two(mf, delta_s, nobeta=True)
                 driver = mf.nuc_grad_method()
-                builder = lowering_grad_elec if delta_s == -1 else same_spin_grad_elec
+                builder = GRADIENT_BUILDERS[delta_s]
                 expected = builder(driver, tdobj, xy)
                 # Force multiple J/K batches, including range-separated terms.
                 driver.max_memory = 0.01
@@ -146,7 +156,7 @@ class GradientLayerChecks(unittest.TestCase):
 
     def test_batched_jk_and_shared_vxc_call_counts(self):
         mf = make_reference(make_molecule(), "CAM-B3LYP")
-        for delta_s in (-1, 0):
+        for delta_s in (-1, 0, 1):
             for nobeta in (False, True):
                 tdobj, xy = exact_state_two(mf, delta_s, nobeta)
                 driver = mf.nuc_grad_method()
@@ -174,10 +184,7 @@ class GradientLayerChecks(unittest.TestCase):
                 driver.get_k = counted_k
                 xc_backend.contract_gga_vxc_derivative = counted_vxc
                 try:
-                    builder = (
-                        lowering_grad_elec if delta_s == -1
-                        else same_spin_grad_elec
-                    )
+                    builder = GRADIENT_BUILDERS[delta_s]
                     result = builder(
                         driver,
                         tdobj,
@@ -189,16 +196,17 @@ class GradientLayerChecks(unittest.TestCase):
 
                 with self.subTest(delta_s=delta_s, nobeta=nobeta):
                     self.assertTrue(np.all(np.isfinite(result.total)))
-                    self.assertEqual(calls["j"], 2)
+                    # deltaS=+1 has no vref1 and therefore no long-range J term.
+                    self.assertEqual(calls["j"], 1 if delta_s == 1 else 2)
                     self.assertEqual(calls["k"], 2)
                     self.assertGreater(max(calls["j_batch"]), 1)
                     self.assertGreater(max(calls["k_batch"]), 1)
                     expected_vxc = 2 if nobeta else 1
                     self.assertEqual(calls["vxc"], expected_vxc)
 
-    def test_full_m_matrix_for_both_channels_and_fock_modes(self):
+    def test_full_m_matrix_for_all_channels_and_fock_modes(self):
         rng = np.random.default_rng(103)
-        for delta_s in (-1, 0):
+        for delta_s in (-1, 0, 1):
             for xc in FUNCTIONALS:
                 mf = make_reference(make_molecule(), xc)
                 for nobeta in (False, True):
@@ -207,17 +215,21 @@ class GradientLayerChecks(unittest.TestCase):
                     nmo = mf.mo_coeff.shape[1]
                     perturbation = rng.normal(size=(nmo, nmo))
                     original = np.array(mf.mo_coeff, copy=True)
-                    step = 1e-6
-                    values = []
+                    # A wider five-point stencil avoids cancellation at 1e-6
+                    # while retaining the same 1e-8 derivative tolerance.
+                    step = 1e-4
+                    values = {}
                     try:
-                        for sign in (1.0, -1.0):
+                        for shift in (1, -1, 2, -2):
                             mf.mo_coeff = original @ (
-                                np.eye(nmo) + sign * step * perturbation
+                                np.eye(nmo) + shift * step * perturbation
                             )
-                            values.append(channel_scalar(tdobj, xy))
+                            values[shift] = channel_scalar(tdobj, xy)
                     finally:
                         mf.mo_coeff = original
-                    finite_difference = (values[0] - values[1]) / (2 * step)
+                    finite_difference = (
+                        8 * (values[1] - values[-1]) - (values[2] - values[-2])
+                    ) / (12 * step)
                     analytic = np.trace(result.m_matrix.T @ perturbation)
                     with self.subTest(
                             delta_s=delta_s, xc=xc, nobeta=nobeta):
@@ -236,6 +248,13 @@ class GradientLayerChecks(unittest.TestCase):
             (-1, "PBE", False),
             (-1, "TPSS", False),
             (-1, "M06-2X", True),
+            (1, "HF", False),
+            (1, "SVWN", False),
+            (1, "PBE", False),
+            (1, "TPSS", False),
+            (1, "M06-2X", False),
+            (1, "M06-2X", True),
+            (1, "CAM-B3LYP", True),
         )
         step = 1e-4
         for delta_s, xc, nobeta in cases:

@@ -432,7 +432,7 @@ def fockz_hfx_terms(tdobj, pz):
 
 
 def fock_probes(tdobj, projections):
-    """AO probes of the explicit F0/Fz scalar for either spin channel."""
+    """AO probes of the explicit F0/Fz scalar for any spin channel."""
     mo = np.asarray(tdobj._scf.mo_coeff)
     p0 = np.zeros((tdobj.mol.nao_nr(), tdobj.mol.nao_nr()))
     pz = np.zeros_like(p0)

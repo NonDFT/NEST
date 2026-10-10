@@ -14,7 +14,7 @@
 
 """Public gradient driver, scanner and finite differences for :mod:`nest.nttda`.
 
-Analytic channel coefficients live in ``delta_s_zero``/``delta_s_minus_one``;
+Analytic channel coefficients live in the three ``delta_s_*`` modules;
 ``driver.assemble_gradient`` performs the common derivative assembly.
 """
 
@@ -27,7 +27,7 @@ from pyscf.lib import logger
 from nest.nttda import NTTDA
 from nest.nttda.nttda import _orbital_indices, _unpack_amplitudes
 
-from . import delta_s_minus_one, delta_s_zero
+from . import delta_s_minus_one, delta_s_zero, delta_s_plus_one
 
 
 def _normalized_amplitude(xy):
@@ -196,9 +196,8 @@ class Gradients(rhf_grad.GradientsBase):
                 self, tdobj, xy, **options,
             )
         if tdobj.deltaS == 1:
-            raise NotImplementedError(
-                "Analytic NTTDA gradients are not implemented for deltaS=1; "
-                "use method='finite_diff'."
+            return delta_s_plus_one.grad_elec(
+                self, tdobj, xy, **options,
             )
         raise ValueError("deltaS must be -1, 0, or 1")
 

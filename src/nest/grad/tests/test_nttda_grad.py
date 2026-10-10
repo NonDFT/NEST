@@ -51,10 +51,16 @@ class NTTDAGradientAcceptance(unittest.TestCase):
         mf.grids.level = 0
         mf.kernel()
         self.assertTrue(mf.converged)
+        # Use the complete 14-dimensional raising space in this tiny molecule.
+        # This keeps reference and displaced roots below the 1e-9 residual
+        # tolerance without marginal Davidson residuals.
+        nstates = 3
+        if delta_s == 1:
+            nstates = np.count_nonzero(mf.mo_occ == 2) * np.count_nonzero(mf.mo_occ == 0)
         tdobj = NTTDA(mf).set(
             deltaS=delta_s,
             nobeta=nobeta,
-            nstates=3,
+            nstates=nstates,
             conv_tol=1e-9,
             lindep=1e-20,
             max_cycle=200,
@@ -100,18 +106,22 @@ class NTTDAGradientAcceptance(unittest.TestCase):
                     xc, delta_s=-1, nobeta=nobeta, threshold=1e-5,
                 )
 
-    def test_delta_s_plus_one_rejects_analytic_and_keeps_finite_difference(self):
-        tdobj = self.make_td("HF", delta_s=1)
-        gradient = tdobj.Gradients().set(verbose=0)
-        with self.assertRaisesRegex(NotImplementedError, "deltaS=1"):
-            gradient.kernel(state=1, method="analytic")
-        finite_difference = gradient.kernel(
-            state=1,
-            atmlst=[0],
-            method="finite_diff",
-            step=1e-3,
+    def test_delta_s_plus_one_hf_lda_gga_mgga_hybrid_and_rsh(self):
+        cases = (
+            ("HF", False),
+            ("SVWN", False),
+            ("PBE", False),
+            ("TPSS", False),
+            ("M06-2X", False),
+            ("M06-2X", True),
+            ("CAM-B3LYP", False),
+            ("CAM-B3LYP", True),
         )
-        self.assertTrue(np.all(np.isfinite(finite_difference)))
+        for xc, nobeta in cases:
+            with self.subTest(xc=xc, nobeta=nobeta):
+                self.compare_public_gradient(
+                    xc, delta_s=1, nobeta=nobeta, threshold=1e-5,
+                )
 
     def test_gradient_inherits_td_memory_limit(self):
         mf = dft.ROKS(self.molecule()).set(max_memory=128)
@@ -119,23 +129,25 @@ class NTTDAGradientAcceptance(unittest.TestCase):
         self.assertEqual(tdobj.Gradients().max_memory, 64)
 
     def test_gradient_parts_and_scanner_keep_total_energy_convention(self):
-        tdobj = self.make_td("HF", delta_s=0)
-        gradient = tdobj.Gradients()
-        reference = gradient.kernel(state=0)
-        total = gradient.kernel(state=2)
-        np.testing.assert_allclose(gradient.grad_nuc(), reference, atol=1e-10, rtol=0)
-        np.testing.assert_allclose(
-            gradient.grad_elec(tdobj.xy[1]) + reference, total, atol=1e-10, rtol=0,
-        )
-        scanner = gradient.as_scanner(state=2)
-        energy, scanned = scanner(tdobj.mol.copy())
-        self.assertTrue(scanner.converged)
-        self.assertAlmostEqual(energy, tdobj.e_tot[1], places=8)
-        np.testing.assert_allclose(scanned, total, atol=1e-8, rtol=0)
-        energy, scanned = scanner(tdobj.mol.copy(), state=0)
-        self.assertTrue(scanner.converged)
-        self.assertAlmostEqual(energy, tdobj._scf.e_tot, places=8)
-        np.testing.assert_allclose(scanned, reference, atol=1e-8, rtol=0)
+        for delta_s in (0, 1):
+            with self.subTest(delta_s=delta_s):
+                tdobj = self.make_td("HF", delta_s=delta_s)
+                gradient = tdobj.Gradients()
+                reference = gradient.kernel(state=0)
+                total = gradient.kernel(state=2)
+                np.testing.assert_allclose(gradient.grad_nuc(), reference, atol=1e-10, rtol=0)
+                np.testing.assert_allclose(
+                    gradient.grad_elec(tdobj.xy[1]) + reference, total, atol=1e-10, rtol=0,
+                )
+                scanner = gradient.as_scanner(state=2)
+                energy, scanned = scanner(tdobj.mol.copy())
+                self.assertTrue(scanner.converged)
+                self.assertAlmostEqual(energy, tdobj.e_tot[1], places=8)
+                np.testing.assert_allclose(scanned, total, atol=1e-8, rtol=0)
+                energy, scanned = scanner(tdobj.mol.copy(), state=0)
+                self.assertTrue(scanner.converged)
+                self.assertAlmostEqual(energy, tdobj._scf.e_tot, places=8)
+                np.testing.assert_allclose(scanned, reference, atol=1e-8, rtol=0)
 
     def test_gradient_without_independent_orbital_rotations(self):
         mol = gto.M(

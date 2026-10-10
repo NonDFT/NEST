@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Scalar-closure tests for both independent NTTDA analytic channels."""
+"""Scalar-closure tests for the three NTTDA analytic channels."""
 
 import unittest
 from pathlib import Path
@@ -34,6 +34,7 @@ from nest.grad.nttda.delta_s_minus_one import (  # noqa: E402
     spin_lowering_action_scalar,
     spin_lowering_ledger_scalar,
 )
+from nest.grad.nttda.delta_s_plus_one import spin_raising_ledger_scalar
 
 
 class SameSpinScalarClosure(unittest.TestCase):
@@ -91,6 +92,28 @@ class SameSpinScalarClosure(unittest.TestCase):
         self.assertTrue(
             str(Path(nest.grad.nttda.__file__).resolve()).startswith(str(Path(nest.__file__).resolve().parent))
         )
+
+    def test_raising_channel_eigenvector_and_random_vector(self):
+        rng = np.random.default_rng(41)
+        for xc in ("HF", "SVWN", "PBE", "TPSS", "M06-2X", "CAM-B3LYP"):
+            mf = dft.ROKS(self.mol).set(xc=xc, conv_tol=1e-11, verbose=0)
+            mf.grids.level = 0
+            mf.kernel()
+            self.assertTrue(mf.converged)
+            for nobeta in (False, True):
+                td = NTTDA(mf).set(deltaS=1, nobeta=nobeta, verbose=0)
+                vind, diagonal = td.gen_vind_sfu()
+                rows = np.asarray(vind(np.eye(diagonal.size)))
+                np.testing.assert_allclose(rows, rows.T, atol=1e-11, rtol=0)
+                _energies, vectors = np.linalg.eigh(rows)
+                for label, vector in (
+                    ("root2", vectors[:, 1]),
+                    ("random", rng.normal(size=diagonal.size)),
+                ):
+                    with self.subTest(xc=xc, nobeta=nobeta, vector=label):
+                        action = float(vector @ vind(vector[None])[0])
+                        scalar = spin_raising_ledger_scalar(td, vector)
+                        self.assertLess(abs(action - scalar), 1e-11)
 
     def test_lowering_channel_uses_an_independent_closed_ledger(self):
         rng = np.random.default_rng(31)

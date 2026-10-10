@@ -38,6 +38,10 @@ from nest.grad.nttda.delta_s_minus_one import (  # noqa: E402
     grad_elec as spin_lowering_grad_elec,
     spin_lowering_ledger_scalar,
 )
+from nest.grad.nttda.delta_s_plus_one import (
+    grad_elec as spin_raising_grad_elec,
+    spin_raising_ledger_scalar,
+)
 from nest import aocscf  # noqa: E402
 from nest.nttda import NTTDA  # noqa: E402
 
@@ -202,37 +206,37 @@ class AOCSCFOrbitalResponse(unittest.TestCase):
         )
         self.assertAlmostEqual(actual, expected, places=11)
 
-    def test_same_spin_m_matrix_is_the_orbital_derivative(self):
+    def test_same_spin_and_raising_m_matrix_are_the_orbital_derivative(self):
         mf = self.make_reference()
-        tdobj = NTTDA(mf).set(
-            deltaS=0,
-            nstates=2,
-            conv_tol=1e-10,
-            max_cycle=200,
-            verbose=0,
-        ).run()
-        xy = tdobj.xy[1]
-        result = grad_elec(
-            mf.nuc_grad_method(), tdobj, xy, atmlst=(),
-        )
-
         rng = np.random.default_rng(29)
         perturbation = rng.normal(size=(mf.mo_coeff.shape[1],) * 2)
         original = np.array(mf.mo_coeff, copy=True)
         step = 1e-6
-        values = []
-        try:
-            for sign in (1.0, -1.0):
-                mf.mo_coeff = original @ (
-                    np.eye(original.shape[1])
-                    + sign * step * perturbation
+        for delta_s, builder, scalar in (
+            (0, grad_elec, same_spin_ledger_scalar),
+            (1, spin_raising_grad_elec, spin_raising_ledger_scalar),
+        ):
+            with self.subTest(delta_s=delta_s):
+                tdobj = NTTDA(mf).set(
+                    deltaS=delta_s, nstates=2, conv_tol=1e-10,
+                    max_cycle=200, verbose=0,
+                ).run()
+                xy = tdobj.xy[1]
+                result = builder(
+                    mf.nuc_grad_method(), tdobj, xy, atmlst=(),
                 )
-                values.append(same_spin_ledger_scalar(tdobj, xy))
-        finally:
-            mf.mo_coeff = original
-        finite_difference = (values[0] - values[1]) / (2.0 * step)
-        analytic = np.trace(result.m_matrix.T @ perturbation)
-        self.assertAlmostEqual(analytic, finite_difference, places=8)
+                values = []
+                try:
+                    for sign in (1.0, -1.0):
+                        mf.mo_coeff = original @ (
+                            np.eye(original.shape[1]) + sign * step * perturbation
+                        )
+                        values.append(scalar(tdobj, xy))
+                finally:
+                    mf.mo_coeff = original
+                finite_difference = (values[0] - values[1]) / (2.0 * step)
+                analytic = np.trace(result.m_matrix.T @ perturbation)
+                self.assertAlmostEqual(analytic, finite_difference, places=8)
 
     def test_spin_lowering_m_matrix_is_the_orbital_derivative(self):
         mf = self.make_spin_one_reference()

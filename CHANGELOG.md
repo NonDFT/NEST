@@ -1,5 +1,11 @@
 ## Unreleased
 
+### Added
+
+- NTTDA analytic gradients for `deltaS=+1` on ROKS and AOCSCF references,
+  including HF, LDA/GGA/MGGA, hybrid and range-separated functionals, and
+  `nobeta`. The derivation and independent algebra check accompany the code.
+
 ### Fixed
 
 - NTTDA analytic gradients handle references with no independent orbital
