@@ -19,12 +19,10 @@ Same-spin amplitudes, Fock projections and response coefficients live here.
 Reference response, J/K derivatives, XC quadrature and the adjoint are shared.
 """
 
-from dataclasses import dataclass
-
 import numpy as np
 
 from pyscf import lib
-from nest.nttda.nttda import gen_rohf_response_sc
+from nest.nttda.nttda import gen_rohf_response_sc, _split_amplitudes
 
 from .common import (
     assemble_gradient,
@@ -42,38 +40,6 @@ from .common import (
 # Orbital spaces and native amplitudes
 
 
-@dataclass(frozen=True)
-class SameSpinAmplitudes:
-    """Five amplitude blocks used by ``NTTDA(deltaS=0)``."""
-
-    co: np.ndarray
-    cv: np.ndarray
-    oo: float
-    ov: np.ndarray
-    cv0: np.ndarray
-
-
-def same_spin_slices(spaces):
-    """Return canonical slices for ``CO/CV/OO/OV/CV0`` amplitudes."""
-    nc = len(spaces.closed)
-    no = len(spaces.open)
-    nv = len(spaces.virtual)
-    nco = nc * no
-    ncv = nc * nv
-    nov = no * nv
-    i1 = nco
-    i2 = i1 + ncv
-    i3 = i2 + 1
-    i4 = i3 + nov
-    return {
-        "CO": slice(0, i1),
-        "CV": slice(i1, i2),
-        "OO": slice(i2, i3),
-        "OV": slice(i3, i4),
-        "CV0": slice(i4, i4 + ncv),
-    }
-
-
 def split_same_spin(tdobj, xy):
     """Split one packed ``deltaS=0`` vector into its five native blocks."""
     spaces = orbital_spaces(tdobj)
@@ -81,43 +47,37 @@ def split_same_spin(tdobj, xy):
         raise ValueError("NTTDA deltaS=0 requires at least one open orbital")
     vector = xy[0] if isinstance(xy, (tuple, list)) else xy
     vector = np.asarray(vector).reshape(-1)
-    slices = same_spin_slices(spaces)
-    expected = slices["CV0"].stop
+    nc, no, nv = len(spaces.closed), len(spaces.open), len(spaces.virtual)
+    expected = nc * no + 2 * nc * nv + 1 + no * nv
     if vector.size != expected:
         raise ValueError(
             "deltaS=0 amplitude has size %d; expected %d" %
             (vector.size, expected)
         )
-    nc = len(spaces.closed)
-    no = len(spaces.open)
-    nv = len(spaces.virtual)
-    return spaces, SameSpinAmplitudes(
-        co=vector[slices["CO"]].reshape(nc, no),
-        cv=vector[slices["CV"]].reshape(nc, nv),
-        oo=float(vector[slices["OO"]][0]),
-        ov=vector[slices["OV"]].reshape(no, nv),
-        cv0=vector[slices["CV0"]].reshape(nc, nv),
-    )
+    co, cv, oo, ov, cv0 = _split_amplitudes(vector, 0, nc, no, nv)
+    return spaces, (co, cv, float(oo), ov, cv0)
 
 
 def same_spin_block_data(spaces, amplitudes):
     """MO index/factor map for variations of same-spin transition densities."""
+    co, cv, _oo, ov, cv0 = amplitudes
     return {
-        "CO": (spaces.open, spaces.closed, amplitudes.co.T),
-        "CV": (spaces.virtual, spaces.closed, amplitudes.cv.T),
-        "OV": (spaces.virtual, spaces.open, amplitudes.ov.T),
-        "CV0": (spaces.virtual, spaces.closed, amplitudes.cv0.T),
+        "CO": (spaces.open, spaces.closed, co.T),
+        "CV": (spaces.virtual, spaces.closed, cv.T),
+        "OV": (spaces.virtual, spaces.open, ov.T),
+        "CV0": (spaces.virtual, spaces.closed, cv0.T),
     }
 
 
 def same_spin_transition_densities(tdobj, xy):
     """Return directed AO transition densities for the four response blocks."""
     spaces, amp = split_same_spin(tdobj, xy)
+    co, cv, _oo, ov, cv0 = amp
     return spaces, amp, {
-        "CO": pair_density(spaces.c_open, amp.co.T, spaces.c_closed),
-        "CV": pair_density(spaces.c_virtual, amp.cv.T, spaces.c_closed),
-        "OV": pair_density(spaces.c_virtual, amp.ov.T, spaces.c_open),
-        "CV0": pair_density(spaces.c_virtual, amp.cv0.T, spaces.c_closed),
+        "CO": pair_density(spaces.c_open, co.T, spaces.c_closed),
+        "CV": pair_density(spaces.c_virtual, cv.T, spaces.c_closed),
+        "OV": pair_density(spaces.c_virtual, ov.T, spaces.c_open),
+        "CV0": pair_density(spaces.c_virtual, cv0.T, spaces.c_closed),
     }
 
 
@@ -148,7 +108,7 @@ def fock0_fockz(tdobj, max_memory=None):
 
 def same_spin_fock_projections(tdobj, xy):
     """Return the complete five-block explicit-Fock ledger."""
-    spaces, x = split_same_spin(tdobj, xy)
+    spaces, (co, cv, oo, ov, cv0) = split_same_spin(tdobj, xy)
     spin = spaces.spin
     c = spaces.c_closed
     o = spaces.c_open
@@ -180,34 +140,34 @@ def same_spin_fock_projections(tdobj, xy):
             ))
 
     # CO row/column and its couplings.
-    add("co-oo", o, x.co.T @ x.co, o, 1.0, -1.0)
-    add("co-cc", c, -x.co @ x.co.T, c, 1.0, -1.0)
-    add("co-cv", o, 2.0 * a * (x.co.T @ x.cv), v, 1.0, -1.0)
-    add("co-oo1", o, -2.0 * x.oo * x.co.T, c, 1.0, -1.0)
-    add("co-cv0", o, 2.0 * h * (x.co.T @ x.cv0), v, 1.0, -1.0)
+    add("co-oo", o, co.T @ co, o, 1.0, -1.0)
+    add("co-cc", c, -co @ co.T, c, 1.0, -1.0)
+    add("co-cv", o, 2.0 * a * (co.T @ cv), v, 1.0, -1.0)
+    add("co-oo1", o, -2.0 * oo * co.T, c, 1.0, -1.0)
+    add("co-cv0", o, 2.0 * h * (co.T @ cv0), v, 1.0, -1.0)
 
     # CV block and its OO/OV/CV0 couplings.
-    add("cv-vv", v, x.cv.T @ x.cv, v, 1.0, -1.0 / spin)
-    add("cv-cc", c, -x.cv @ x.cv.T, c, 1.0, 1.0 / spin)
-    add("cv-oo1", v, 2.0 * b * x.oo * x.cv.T, c, 0.0, 1.0)
-    add("cv-ov", o, -2.0 * a * (x.ov @ x.cv.T), c, 1.0, 1.0)
+    add("cv-vv", v, cv.T @ cv, v, 1.0, -1.0 / spin)
+    add("cv-cc", c, -cv @ cv.T, c, 1.0, 1.0 / spin)
+    add("cv-oo1", v, 2.0 * b * oo * cv.T, c, 0.0, 1.0)
+    add("cv-ov", o, -2.0 * a * (ov @ cv.T), c, 1.0, 1.0)
     add(
         "cv-cv0-vv", v,
-        -d * (x.cv.T @ x.cv0 + x.cv0.T @ x.cv), v, 0.0, 1.0,
+        -d * (cv.T @ cv0 + cv0.T @ cv), v, 0.0, 1.0,
     )
     add(
         "cv-cv0-cc", c,
-        d * (x.cv0 @ x.cv.T + x.cv @ x.cv0.T), c, 0.0, 1.0,
+        d * (cv0 @ cv.T + cv @ cv0.T), c, 0.0, 1.0,
     )
 
     # OV and CV0 diagonal/coupling terms.
-    add("ov-vv", v, x.ov.T @ x.ov, v, 1.0, 1.0)
-    add("ov-oo", o, -x.ov @ x.ov.T, o, 1.0, 1.0)
-    add("ov-oo1", v, 2.0 * x.oo * x.ov.T, o, 1.0, 1.0)
-    add("ov-cv0", c, 2.0 * h * (x.cv0 @ x.ov.T), o, 1.0, 1.0)
-    add("cv0-vv", v, x.cv0.T @ x.cv0, v, 1.0, 0.0)
-    add("cv0-cc", c, -x.cv0 @ x.cv0.T, c, 1.0, 0.0)
-    add("cv0-oo1", v, -2.0 * np.sqrt(2.0) * x.oo * x.cv0.T, c, 1.0, 0.0)
+    add("ov-vv", v, ov.T @ ov, v, 1.0, 1.0)
+    add("ov-oo", o, -ov @ ov.T, o, 1.0, 1.0)
+    add("ov-oo1", v, 2.0 * oo * ov.T, o, 1.0, 1.0)
+    add("ov-cv0", c, 2.0 * h * (cv0 @ ov.T), o, 1.0, 1.0)
+    add("cv0-vv", v, cv0.T @ cv0, v, 1.0, 0.0)
+    add("cv0-cc", c, -cv0 @ cv0.T, c, 1.0, 0.0)
+    add("cv0-oo1", v, -2.0 * np.sqrt(2.0) * oo * cv0.T, c, 1.0, 0.0)
     return tuple(terms)
 
 

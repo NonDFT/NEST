@@ -1105,17 +1105,16 @@ class NTTDA(TDBase):
     gen_vind_sfd = gen_vind_sfd
 
 
-def _unpack_amplitudes(tdobj, state, nc, no, nv):
+def _split_amplitudes(x, delta_s, nc, no, nv):
     """Return CO[i,u], CV[i,a], OO[u,t], OV[u,a], CV0[i,a].
 
     Formula labels are CO(ui), CV(ai), OO(tu), OV(au), CV0(ai).
     For deltaS=0 OO is a scalar; for deltaS=+1 only CV is present.
     """
-    x, _ = tdobj.xy[state]
     x = np.asarray(x)
-    if tdobj.deltaS == 1:
+    if delta_s == 1:
         return None, x.reshape(nc, nv), None, None, None
-    if tdobj.deltaS == 0:
+    if delta_s == 0:
         slices = _sc_vector_slices(nc, no, nv)
         x = x.reshape(slices['CV(0)'].stop)
         return (x[slices['CO(1)']].reshape(nc, no),
@@ -1123,10 +1122,15 @@ def _unpack_amplitudes(tdobj, state, nc, no, nv):
                 x[slices['OO(1)']][0],
                 x[slices['OV(1)']].reshape(no, nv),
                 x[slices['CV(0)']].reshape(nc, nv))
-    if tdobj.deltaS == -1:
+    if delta_s == -1:
         x = x.reshape(nc + no, no + nv)
         return x[:nc, :no], x[:nc, no:], x[nc:, :no], x[nc:, no:], None
     raise ValueError('deltaS should be -1, 0, or 1')
+
+
+def _unpack_amplitudes(tdobj, state, nc, no, nv):
+    """Split a stored root using the same layout as the gradient channels."""
+    return _split_amplitudes(tdobj.xy[state][0], tdobj.deltaS, nc, no, nv)
 
 
 def transition_dm(tdobj, bra, ket):

@@ -18,12 +18,10 @@ This module owns the spin-lowering amplitudes, Fock projections and response
 coefficients. Reference response and AO derivatives are shared between channels.
 """
 
-from dataclasses import dataclass
-
 import numpy as np
 
 from pyscf import lib
-from nest.nttda.nttda import gen_rohf_response_sfd
+from nest.nttda.nttda import gen_rohf_response_sfd, _split_amplitudes
 
 from .common import (
     assemble_gradient,
@@ -42,16 +40,6 @@ from .common import (
 # Orbital spaces and native amplitudes
 
 
-@dataclass(frozen=True)
-class SpinLoweringAmplitudes:
-    """Four native blocks used by ``NTTDA(deltaS=-1)``."""
-
-    co: np.ndarray
-    cv: np.ndarray
-    oo: np.ndarray
-    ov: np.ndarray
-
-
 def split_spin_lowering(tdobj, xy):
     """Split a lowering-channel amplitude into ``CO/CV/OO/OV`` blocks."""
     spaces = orbital_spaces(tdobj)
@@ -68,33 +56,30 @@ def split_spin_lowering(tdobj, xy):
             "deltaS=-1 amplitude has size %d; expected %d" %
             (vector.size, expected[0] * expected[1])
         )
-    vector = vector.reshape(expected)
-    return spaces, SpinLoweringAmplitudes(
-        co=vector[:nc, :no],
-        cv=vector[:nc, no:],
-        oo=vector[nc:, :no],
-        ov=vector[nc:, no:],
-    )
+    co, cv, oo, ov, _cv0 = _split_amplitudes(vector, -1, nc, no, nv)
+    return spaces, (co, cv, oo, ov)
 
 
 def spin_lowering_transition_densities(tdobj, xy):
     """Directed alpha-occupied to beta-target transition densities."""
     spaces, amp = split_spin_lowering(tdobj, xy)
+    co, cv, oo, ov = amp
     return spaces, amp, {
-        "CO": pair_density(spaces.c_open, amp.co.T, spaces.c_closed),
-        "CV": pair_density(spaces.c_virtual, amp.cv.T, spaces.c_closed),
-        "OO": pair_density(spaces.c_open, amp.oo.T, spaces.c_open),
-        "OV": pair_density(spaces.c_virtual, amp.ov.T, spaces.c_open),
+        "CO": pair_density(spaces.c_open, co.T, spaces.c_closed),
+        "CV": pair_density(spaces.c_virtual, cv.T, spaces.c_closed),
+        "OO": pair_density(spaces.c_open, oo.T, spaces.c_open),
+        "OV": pair_density(spaces.c_virtual, ov.T, spaces.c_open),
     }
 
 
 def spin_lowering_block_data(spaces, amplitudes):
     """MO index/factor map for variations of lowering transition densities."""
+    co, cv, oo, ov = amplitudes
     return {
-        "CO": (spaces.open, spaces.closed, amplitudes.co.T),
-        "CV": (spaces.virtual, spaces.closed, amplitudes.cv.T),
-        "OO": (spaces.open, spaces.open, amplitudes.oo.T),
-        "OV": (spaces.virtual, spaces.open, amplitudes.ov.T),
+        "CO": (spaces.open, spaces.closed, co.T),
+        "CV": (spaces.virtual, spaces.closed, cv.T),
+        "OO": (spaces.open, spaces.open, oo.T),
+        "OV": (spaces.virtual, spaces.open, ov.T),
     }
 
 
@@ -156,15 +141,15 @@ def spin_lowering_fock0_fockz(tdobj, max_memory=None):
 
 def spin_lowering_fock_projections(tdobj, xy):
     """Complete explicit-Fock ledger of ``X.T A_sfd X``."""
-    spaces, amplitudes = split_spin_lowering(tdobj, xy)
+    spaces, (co, cv, oo, ov) = split_spin_lowering(tdobj, xy)
     c = spaces.c_closed
     o = spaces.c_open
     v = spaces.c_virtual
     block_data = (
-        ("C", "O", amplitudes.co),
-        ("C", "V", amplitudes.cv),
-        ("O", "O", amplitudes.oo),
-        ("O", "V", amplitudes.ov),
+        ("C", "O", co),
+        ("C", "V", cv),
+        ("O", "O", oo),
+        ("O", "V", ov),
     )
     orbital_data = {
         "C": (spaces.closed, c),
@@ -217,30 +202,30 @@ def spin_lowering_fock_projections(tdobj, xy):
 
     # Tensor spin-adaptation correction, expressed in the same F0/Fz basis.
     spin = spaces.spin
-    trace_oo = float(np.trace(amplitudes.oo))
+    trace_oo = float(np.trace(oo))
     eta = np.sqrt((2.0 * spin + 1.0) / (2.0 * spin)) - 1.0
     gamma = np.sqrt((2.0 * spin + 1.0) / (2.0 * spin - 1.0))
     zeta = np.sqrt(2.0 * spin / (2.0 * spin - 1.0)) - 1.0
     chi = 1.0 / np.sqrt(2.0 * spin * (2.0 * spin - 1.0))
     t_cc = (
-        amplitudes.cv @ amplitudes.cv.T / spin
-        + amplitudes.co @ amplitudes.co.T * 2.0 / (2.0 * spin - 1.0)
+        cv @ cv.T / spin
+        + co @ co.T * 2.0 / (2.0 * spin - 1.0)
     )
     t_vv = (
-        amplitudes.cv.T @ amplitudes.cv / spin
-        + amplitudes.ov.T @ amplitudes.ov * 2.0 / (2.0 * spin - 1.0)
+        cv.T @ cv / spin
+        + ov.T @ ov * 2.0 / (2.0 * spin - 1.0)
     )
-    t_cv = gamma * (1.0 + 1.0 / spin) * trace_oo * amplitudes.cv
+    t_cv = gamma * (1.0 + 1.0 / spin) * trace_oo * cv
     t_beta_vo = (
-        2.0 * eta * amplitudes.cv.T @ amplitudes.co
-        + 2.0 * zeta * amplitudes.ov.T @ amplitudes.oo
+        2.0 * eta * cv.T @ co
+        + 2.0 * zeta * ov.T @ oo
     )
-    t_beta_co = 2.0 * chi * trace_oo * amplitudes.co
+    t_beta_co = 2.0 * chi * trace_oo * co
     t_alpha_oc = (
-        -2.0 * eta * amplitudes.cv @ amplitudes.ov.T
-        - 2.0 * zeta * amplitudes.co @ amplitudes.oo.T
+        -2.0 * eta * cv @ ov.T
+        - 2.0 * zeta * co @ oo.T
     ).T
-    t_alpha_vo = -2.0 * chi * trace_oo * amplitudes.ov.T
+    t_alpha_vo = -2.0 * chi * trace_oo * ov.T
 
     add("adapt-spin-cc", "C", t_cc, "C", 0.0, -1.0)
     add("adapt-spin-vv", "V", t_vv, "V", 0.0, -1.0)
