@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2026 The NEST Developers. All Rights Reserved.
+# Copyright 2014-2024 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -32,6 +32,139 @@ from pyscf import symm
 from pyscf.data import nist
 
 MO_BASE = getattr(__config__, 'MO_BASE', 1)
+MO_GRID_FXC1 = True
+
+
+def _fxc1_gga_mo_wv(fxc, t, i):
+    nvec = t.shape[0]
+    ngrids = t.shape[-1]
+    wv = np.empty((nvec, 4, ngrids))
+    t00 = t[:, 0, 0]
+    if i == 0:
+        wv[:, 0] = lib.einsum('ijg,xijg->xg', fxc[:4, :4], t)
+        wv[:, 1:4] = fxc[0, 1:4][None] * t00[:, None]
+        wv[:, 1:4] += lib.einsum('ijg,xig->xjg', fxc[1:4, 1:4], t[:, 1:4, 0])
+    else:
+        wv[:, 0] = fxc[i, 0][None] * t00
+        wv[:, 0] += lib.einsum('jg,xjg->xg', fxc[i, 1:4], t[:, 0, 1:4])
+        wv[:, 1:4] = fxc[i, 1:4][None] * t00[:, None]
+    return wv
+
+def _fxc1_mgga_mo_wv(fxc, t, i):
+    nvec = t.shape[0]
+    ngrids = t.shape[-1]
+    wv = np.empty((nvec, 4, ngrids))
+    t00 = t[:, 0, 0]
+    if i == 0:
+        wv[:, 0] = lib.einsum('ijg,xijg->xg', fxc[:4, :4], t)
+        wv[:, 1:4] = fxc[0, 1:4][None] * t00[:, None]
+        wv[:, 1:4] += lib.einsum('ijg,xig->xjg', fxc[1:4, 1:4], t[:, 1:4, 0])
+        wv[:, 1:4] += 0.5 * fxc[0, 4][None, None] * t[:, 0, 1:4]
+        wv[:, 1:4] += 0.5 * lib.einsum('ig,xijg->xjg', fxc[1:4, 4], t[:, 1:4, 1:4])
+    else:
+        wv[:, 0] = fxc[i, 0][None] * t00
+        wv[:, 0] += lib.einsum('jg,xjg->xg', fxc[i, 1:4], t[:, 0, 1:4])
+        wv[:, 0] += 0.5 * fxc[4, 0][None] * t[:, i, 0]
+        wv[:, 0] += 0.5 * lib.einsum('jg,xjg->xg', fxc[4, 1:4], t[:, i, 1:4])
+        wv[:, 1:4] = fxc[i, 1:4][None] * t00[:, None]
+        wv[:, 1:4] += 0.5 * fxc[i, 4][None, None] * t[:, 0, 1:4]
+        wv[:, 1:4] += 0.5 * fxc[4, 1:4][None] * t[:, i, 0][:, None]
+        wv[:, 1:4] += 0.25 * fxc[4, 4][None, None] * t[:, i, 1:4]
+    return wv
+
+def _fxc1_mo_make_t(x, left_mo, right_mo):
+    '''Build T[x,i,j,g] = L[j,g,a] X[x,a,b] R[i,g,b].
+
+    ``left_mo`` and ``right_mo`` contain AO values and first derivatives
+    projected to the two MO spaces.  The transpose of X lets the inner dot use
+    BLAS over the right-index dimension.
+    '''
+    nvec = x.shape[0]
+    ngrids = left_mo.shape[1]
+    t = np.empty((nvec, 4, 4, ngrids))
+    for num in range(nvec):
+        xt = np.asarray(x[num].T, order='C')
+        for i in range(4):
+            tmp = lib.dot(right_mo[i], xt)
+            for j in range(4):
+                t[num, i, j] = lib.einsum('go,go->g', tmp, left_mo[j])
+    return t
+
+def _fxc1_mo_accumulate(out, left_mo, right_mo, wv, coef):
+    '''Accumulate coef * L[j].T @ diag(wv[x,i,j]) @ R[i] to a MO block.'''
+    if coef == 0:
+        return
+    nvec = out.shape[0]
+    for num in range(nvec):
+        for i in range(4):
+            ri = right_mo[i]
+            for j in range(4):
+                weighted_left = left_mo[j] * wv[num, i, j, :, None]
+                out[num] += coef * lib.dot(weighted_left.T, ri)
+
+def _nr_rks_fxc1_mo(ni, mol, grids, mo_blocks, in_blocks, out_blocks,
+                    terms, fxc, xctype, max_memory=2000):
+    '''Contract the fxc1 kernel directly in selected MO spaces.
+
+    ``in_blocks`` maps an input name to (X, left_mo_key, right_mo_key).
+    ``out_blocks`` maps an output name to its projection MO spaces.
+    ``terms`` is the existing NTTDA linear combination as
+    (input_name, output_name, coefficient).  The function returns MO-basis
+    contributions only; the AO vref0 and hybrid JK paths stay outside.
+    '''
+    if xctype == 'GGA':
+        fill_wv = _fxc1_gga_mo_wv
+    elif xctype == 'MGGA':
+        fill_wv = _fxc1_mgga_mo_wv
+    else:
+        raise ValueError(f'MO-grid fxc1 only supports GGA/MGGA, got {xctype}')
+
+    nao = mol.nao_nr()
+    nvec = next(iter(in_blocks.values()))[0].shape[0]
+    out = {
+        name: np.zeros((nvec, mo_blocks[left_key].shape[1],
+                        mo_blocks[right_key].shape[1]))
+        for name, (left_key, right_key) in out_blocks.items()
+    }
+    needed_mos = set()
+    for x, left_key, right_key in in_blocks.values():
+        needed_mos.add(left_key)
+        needed_mos.add(right_key)
+    for left_key, right_key in out_blocks.values():
+        needed_mos.add(left_key)
+        needed_mos.add(right_key)
+
+    terms_by_input = {}
+    for in_name, out_name, coef in terms:
+        terms_by_input.setdefault(in_name, []).append((out_name, coef))
+
+    p1 = 0
+    for ao, mask, weight, coords in ni.block_loop(mol, grids, nao, 1, max_memory=max_memory):
+        p0, p1 = p1, p1 + weight.size
+        ngrids = weight.size
+        _fxc = fxc[:, :, p0:p1] * weight
+
+        mo_cache = {}
+        for key in needed_mos:
+            coeff = mo_blocks[key]
+            mo = np.empty((4, ngrids, coeff.shape[1]))
+            for i in range(4):
+                mo[i] = lib.dot(ao[i], coeff)
+            mo_cache[key] = mo
+
+        for in_name, (x, left_key, right_key) in in_blocks.items():
+            input_terms = terms_by_input.get(in_name)
+            if not input_terms:
+                continue
+            t = _fxc1_mo_make_t(x, mo_cache[left_key], mo_cache[right_key])
+            wv = np.empty((nvec, 4, 4, ngrids))
+            for i in range(4):
+                wv[:, i] = fill_wv(_fxc, t, i)
+            for out_name, coef in input_terms:
+                out_left_key, out_right_key = out_blocks[out_name]
+                _fxc1_mo_accumulate(out[out_name], mo_cache[out_left_key],
+                                    mo_cache[out_right_key], wv, coef)
+    return out
 
 def nr_rks_fxc1_gga(ni, mol, grids, xc_code, dms, fxc, max_memory=2000):
     nset = dms.shape[0]
@@ -162,8 +295,6 @@ def gen_rohf_response_sfu(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=No
     mol = mf.mol
     if log is None:
         log = logger.new_logger(mf)
-    if not isinstance(mf, (dft.roks.ROKS, dft.rks_symm.SymAdaptedROKS)):
-        raise TypeError('NTTDA response requires ROKS reference')
 
     ni = mf._numint
     ni.libxc.test_deriv_order(mf.xc, 2, raise_error=True)
@@ -186,7 +317,7 @@ def gen_rohf_response_sfu(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=No
             time_xc = (logger.process_clock(), logger.perf_counter())
             v1ao_cv = ni.nr_rks_fxc(mol, mf.grids, mf.xc, None, dms_cv, 0, hermi,
                                     None, None, fxc_ref, max_memory=max_memory)
-            time_xc = log.timer('NTTDA response_sfu kernel v1ao_cv', *time_xc)
+            time_xc = log.timer('NTTDA response_sfu kernel xc response_cv', *time_xc)
         else:
             v1ao_cv = np.zeros_like(dms_cv)
 
@@ -211,7 +342,8 @@ def gen_rohf_response_sfu(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=No
             delta -= mf.get_k(mol, dmoo, 1, omega=omega) * (alpha - hyb)
     return vind, 0.5 * delta
 
-def gen_rohf_response_sc(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=None, log=None):
+def gen_rohf_response_sc(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=None,
+                         log=None, fxc_ref=None, skip_xc_vref1=False):
     '''
     response function for Sf=Si
     '''
@@ -223,8 +355,6 @@ def gen_rohf_response_sc(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=Non
     mol = mf.mol
     if log is None:
         log = logger.new_logger(mf)
-    if not isinstance(mf, (dft.roks.ROKS, dft.rks_symm.SymAdaptedROKS)):
-        raise TypeError('NTTDA response requires ROKS reference')
 
     s = (mol.nelec[0] - mol.nelec[1]) * 0.5
 
@@ -233,7 +363,7 @@ def gen_rohf_response_sc(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=Non
     omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, mol.spin)
     hybrid = ni.libxc.is_hybrid_xc(mf.xc)
     xctype = ni._xc_type(mf.xc)
-    if xctype != 'HF':
+    if xctype != 'HF' and fxc_ref is None:
         fxc_d0 = ni.cache_xc_kernel(mol, mf.grids, mf.xc, mo_coeff, mo_occ, 1)[2]
         fxc_ref = 0.5 * (fxc_d0[0, :, 0] - fxc_d0[0, :, 1] - fxc_d0[1, :, 0] + fxc_d0[1, :, 1])
 
@@ -266,7 +396,9 @@ def gen_rohf_response_sc(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=Non
             vref0 = ni.nr_rks_fxc(mol, mf.grids, mf.xc, None, dms0, 0, hermi,
                                   None, None, fxc_ref, max_memory=max_memory)
             time_xc = log.timer('NTTDA response_sc kernel vref0', *time_xc)
-            if xctype == 'LDA':
+            if skip_xc_vref1 and xctype in ('GGA', 'MGGA'):
+                vref1 = np.zeros_like(dms1)
+            elif xctype == 'LDA':
                 vref1 = ni.nr_rks_fxc(mol, mf.grids, mf.xc, None, dms1, 0, hermi,
                                       None, None, fxc_ref, max_memory=max_memory)
             elif xctype =='GGA':
@@ -319,7 +451,8 @@ def gen_rohf_response_sc(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=Non
             delta -= mf.get_k(mol, dmoo, 1, omega=omega) * (alpha - hyb)
     return vind, 0.5 * delta
 
-def gen_rohf_response_sfd(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=None, log=None):
+def gen_rohf_response_sfd(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=None,
+                          log=None, fxc_ref=None, skip_xc_vref1=False):
     '''
     response function for Sf=Si-1
     '''
@@ -331,8 +464,6 @@ def gen_rohf_response_sfd(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=No
     mol = mf.mol
     if log is None:
         log = logger.new_logger(mf)
-    if not isinstance(mf, (dft.roks.ROKS, dft.rks_symm.SymAdaptedROKS)):
-        raise TypeError('NTTDA response requires ROKS reference')
 
     s = (mol.nelec[0] - mol.nelec[1]) * 0.5
 
@@ -342,7 +473,7 @@ def gen_rohf_response_sfd(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=No
     hybrid = ni.libxc.is_hybrid_xc(mf.xc)
     xctype = ni._xc_type(mf.xc)
 
-    if xctype != 'HF':
+    if xctype != 'HF' and fxc_ref is None:
         fxc_d0 = ni.cache_xc_kernel(mol, mf.grids, mf.xc, mo_coeff, mo_occ, 1)[2]
         fxc_ref = 0.5 * (fxc_d0[0, :, 0] - fxc_d0[0, :, 1] - fxc_d0[1, :, 0] + fxc_d0[1, :, 1])
 
@@ -374,7 +505,9 @@ def gen_rohf_response_sfd(mf, mo_coeff=None, mo_occ=None, hermi=0, max_memory=No
             vref0 = ni.nr_rks_fxc(mol, mf.grids, mf.xc, None, dms0, 0, hermi,
                                   None, None, fxc_ref, max_memory=max_memory)
             time_xc = log.timer('NTTDA response_sf vref0', *time_xc)
-            if xctype == 'LDA':
+            if skip_xc_vref1 and xctype in ('GGA', 'MGGA'):
+                vref1 = np.zeros_like(dms1)
+            elif xctype == 'LDA':
                 vref1 = ni.nr_rks_fxc(mol, mf.grids, mf.xc, None, dms1, 0, hermi,
                                       None, None, fxc_ref, max_memory=max_memory)
             elif xctype =='GGA':
@@ -448,14 +581,11 @@ def gen_vind_sfu(td):
         dma, dmb = mf.make_rdm1()
         dm0 = 0.5 * (dma + dmb)
         fock = mf.get_fock(dm=np.array([dm0, dm0]))
-        fock0 = 0.5 * (fock.focka + fock.fockb)
-        focka = fock0 + fockz
-        fockb = fock0 - fockz
     else:
         fock = mf.get_fock()
-        fock0 = 0.5 * (fock.focka + fock.fockb)
-        focka = fock0 + fockz
-        fockb = fock0 - fockz
+    fock0 = 0.5 * (fock.focka + fock.fockb)
+    focka = fock0 + fockz
+    fockb = fock0 - fockz
 
     fock_v = orbvs.T @ focka @ orbvs
     fock_c = orbcs.T @ fockb @ orbcs
@@ -492,6 +622,7 @@ def gen_vind_sc(td):
     orbcs = mo_coeff[:, csidx]
     orbos = mo_coeff[:, osidx]
     orbvs = mo_coeff[:, vsidx]
+    mo_blocks = {'c': orbcs, 'o': orbos, 'v': orbvs}
     ncs = orbcs.shape[1]
     nos = orbos.shape[1]
     nvs = orbvs.shape[1]
@@ -502,21 +633,28 @@ def gen_vind_sc(td):
     assert s == (mf.mol.nelec[0] - mf.mol.nelec[1]) * 0.5
 
     log = logger.new_logger(td)
+    xctype = mf._numint._xc_type(mf.xc)
+    use_mo_grid_fxc1 = MO_GRID_FXC1 and xctype in ('GGA', 'MGGA')
+    fxc_ref = None
+    if use_mo_grid_fxc1:
+        fxc_d0 = mf._numint.cache_xc_kernel(mf.mol, mf.grids, mf.xc,
+                                            mo_coeff, mo_occ, 1)[2]
+        fxc_ref = 0.5 * (fxc_d0[0, :, 0] - fxc_d0[0, :, 1] -
+                         fxc_d0[1, :, 0] + fxc_d0[1, :, 1])
     vresp, fockz = gen_rohf_response_sc(mf, mo_coeff=mo_coeff, mo_occ=mo_occ, hermi=0,
-                                        max_memory=td.max_memory, log=log)
+                                        max_memory=td.max_memory, log=log,
+                                        fxc_ref=fxc_ref,
+                                        skip_xc_vref1=use_mo_grid_fxc1)
 
     if td.nobeta:
         dma, dmb = mf.make_rdm1()
         dm0 = 0.5 * (dma + dmb)
         fock = mf.get_fock(dm=np.array([dm0, dm0]))
-        fock0 = 0.5 * (fock.focka + fock.fockb)
-        focka = fock0 + fockz
-        fockb = fock0 - fockz
     else:
         fock = mf.get_fock()
-        fock0 = 0.5 * (fock.focka + fock.fockb)
-        focka = fock0 + fockz
-        fockb = fock0 - fockz
+    fock0 = 0.5 * (fock.focka + fock.fockb)
+    focka = fock0 + fockz
+    fockb = fock0 - fockz
 
     fock_coco1 = orbos.T @ (fock0 - fockz) @ orbos
     fock_coco2 = orbcs.T @ (fock0 - fockz) @ orbcs
@@ -565,6 +703,37 @@ def gen_vind_sc(td):
         v1mo_ov = lib.einsum('xpq,qo,pv->xov', v1ao_ov, orbos, orbvs.conj())
         v1mo_cv0 = lib.einsum('xpq,qo,pv->xov', v1ao_cv0, orbcs, orbvs.conj())
         time1 = log.timer('NTTDA gen_vind_sc AO->MO transform', *time1)
+
+        if use_mo_grid_fxc1:
+            time_mo = (logger.process_clock(), logger.perf_counter())
+            in_blocks = {
+                'co': (zs_co, 'c', 'o'),
+                'ov': (zs_ov, 'o', 'v'),
+                'cv0': (zs_cv0, 'c', 'v'),
+            }
+            out_blocks = {
+                'co': ('c', 'o'),
+                'ov': ('o', 'v'),
+                'cv0': ('c', 'v'),
+            }
+            terms = (
+                ('co', 'co', -1.0),
+                ('ov', 'co', 1.0),
+                ('cv0', 'co', -np.sqrt(2.0)),
+                ('co', 'ov', 1.0),
+                ('ov', 'ov', -1.0),
+                ('cv0', 'ov', np.sqrt(2.0)),
+                ('co', 'cv0', -np.sqrt(2.0)),
+                ('ov', 'cv0', np.sqrt(2.0)),
+                ('cv0', 'cv0', -2.0),
+            )
+            vref1_mo = _nr_rks_fxc1_mo(
+                mf._numint, mf.mol, mf.grids, mo_blocks, in_blocks,
+                out_blocks, terms, fxc_ref, xctype, max_memory=td.max_memory)
+            v1mo_co += vref1_mo['co']
+            v1mo_ov += vref1_mo['ov']
+            v1mo_cv0 += vref1_mo['cv0']
+            time1 = log.timer('NTTDA gen_vind_sc MO-grid vref1', *time_mo)
 
         v1mo_co += lib.einsum('uv,xiv->xiu', fock_coco1, zs_co)
         v1mo_co -= lib.einsum('ji,xju->xiu', fock_coco2, zs_co)
@@ -622,6 +791,7 @@ def gen_vind_sfd(td):
     orbcs = mo_coeff[:, csidx]
     orbos = mo_coeff[:, osidx]
     orbvs = mo_coeff[:, vsidx]
+    mo_blocks = {'c': orbcs, 'o': orbos, 'v': orbvs}
     ncs = orbcs.shape[1]
     nos = orbos.shape[1]
     nvs = orbvs.shape[1]
@@ -633,21 +803,30 @@ def gen_vind_sfd(td):
     virt_cols = slice(nos, None)
 
     s = nos * 0.5
-    assert s >= 0.5, 'NTTDA for Sf=Si-1 only supports case that Si>=1.'
+    assert s >= 1, 'NTTDA for Sf=Si-1 only supports case that Si>=1.'
     assert s == (mf.mol.nelec[0] - mf.mol.nelec[1]) * 0.5
 
     log = logger.new_logger(td)
+    xctype = mf._numint._xc_type(mf.xc)
+    use_mo_grid_fxc1 = MO_GRID_FXC1 and xctype in ('GGA', 'MGGA')
+    fxc_ref = None
+    if use_mo_grid_fxc1:
+        fxc_d0 = mf._numint.cache_xc_kernel(mf.mol, mf.grids, mf.xc,
+                                            mo_coeff, mo_occ, 1)[2]
+        fxc_ref = 0.5 * (fxc_d0[0, :, 0] - fxc_d0[0, :, 1] -
+                         fxc_d0[1, :, 0] + fxc_d0[1, :, 1])
     vresp, fockz = gen_rohf_response_sfd(mf, mo_coeff=mo_coeff, mo_occ=mo_occ, hermi=0,
-                                         max_memory=td.max_memory, log=log)
+                                         max_memory=td.max_memory, log=log,
+                                         fxc_ref=fxc_ref,
+                                         skip_xc_vref1=use_mo_grid_fxc1)
 
     if td.nobeta:
         dma, dmb = mf.make_rdm1()
         dm0 = 0.5 * (dma + dmb)
         fock = mf.get_fock(dm=np.array([dm0, dm0]))
-        fock0 = 0.5 * (fock.focka + fock.fockb)
     else:
         fock = mf.get_fock()
-        fock0 = 0.5 * (fock.focka + fock.fockb)
+    fock0 = 0.5 * (fock.focka + fock.fockb)
 
     fock_coco0 = orbos.T @ (fock0 - fockz) @ orbos
     fock_coco1 = orbcs.T @ (fock0 + fockz) @ orbcs
@@ -699,6 +878,30 @@ def gen_vind_sfd(td):
         v1mo_oo = lib.einsum('xpq,qo,pv->xov', v1ao_oo, orbos, orbos.conj())
         v1mo_ov = lib.einsum('xpq,qo,pv->xov', v1ao_ov, orbos, orbvs.conj())
         time1 = log.timer('NTTDA gen_vind_sfd AO->MO transform', *time1)
+
+        if use_mo_grid_fxc1:
+            time_mo = (logger.process_clock(), logger.perf_counter())
+            denom = 2 * s - 1
+            in_blocks = {
+                'co': (zs_co, 'c', 'o'),
+                'ov': (zs_ov, 'o', 'v'),
+            }
+            out_blocks = {
+                'co': ('c', 'o'),
+                'ov': ('o', 'v'),
+            }
+            terms = (
+                ('co', 'co', 1.0 / denom),
+                ('ov', 'co', -1.0 / denom),
+                ('co', 'ov', -1.0 / denom),
+                ('ov', 'ov', 1.0 / denom),
+            )
+            vref1_mo = _nr_rks_fxc1_mo(
+                mf._numint, mf.mol, mf.grids, mo_blocks, in_blocks,
+                out_blocks, terms, fxc_ref, xctype, max_memory=td.max_memory)
+            v1mo_co += vref1_mo['co']
+            v1mo_ov += vref1_mo['ov']
+            time1 = log.timer('NTTDA gen_vind_sfd MO-grid vref1', *time_mo)
 
         v1mo_co += lib.einsum('uv,xiv->xiu', fock_coco0, zs_co)
         v1mo_co -= lib.einsum('ji,xju->xiu', fock_coco1, zs_co)
@@ -759,18 +962,36 @@ class NTTDA(TDBase):
     nobeta: True for problemstic cases where there is no local beta electrons
     '''
 
-    deltaS = -1
-    nobeta = False
+    deltaS = getattr(__config__, 'NTTDA_delta_S', -1)
+    nobeta = getattr(__config__, 'NTTDA_nobeta', False)
+    singlet = None
 
     _keys = {'deltaS', 'nobeta'}
 
     def nuc_grad_method(self):
-        """Return the NTTDA nuclear-gradient driver."""
+        """Return the independent NTTDA nuclear-gradient driver."""
         from nest.grad.nttda import Gradients
-
         return Gradients(self)
 
     Gradients = nuc_grad_method
+
+    def dump_flags(self, verbose=None):
+        TDBase.dump_flags(self, verbose)
+        log = logger.new_logger(self, verbose)
+        s = self.mol.spin * 0.5
+        log.info('deltaS = %s (Si = %g -> Sf = %g)', self.deltaS, s, s + self.deltaS)
+        if self.nobeta:
+            log.info('Numerical stabilization enabled to avoid potential divergence '
+                     'at low local beta-electron density')
+        if self.deltaS == -1:
+            log.info('Redundant zero-energy state excluded from the excitation calculation')
+        return self
+
+    def check_sanity(self):
+        if self.deltaS not in (-1, 0, 1):
+            raise ValueError('deltaS must be -1, 0, or 1')
+        TDBase.check_sanity(self)
+        return self
 
     def init_guess(self, hdiag, nstates=None):
         if nstates is None:
@@ -784,16 +1005,16 @@ class NTTDA(TDBase):
     def kernel(self, x0=None, nstates=None):
         cpu0 = (logger.process_clock(), logger.perf_counter())
 
-        self.check_sanity()
-        self.dump_flags()
-
         if nstates is None:
             nstates = self.nstates
         else:
             self.nstates = nstates
-        if self.deltaS == -1:
-            nstates += 1
-        log = logger.Logger(self.stdout, self.verbose)
+
+        self.check_sanity()
+        if self.verbose >= logger.INFO:
+            self.dump_flags()
+
+        log = logger.new_logger(self)
 
         def all_eigs(w, v, nroots, envs):
             return w, v, np.arange(w.size)
@@ -802,23 +1023,43 @@ class NTTDA(TDBase):
             vind, hdiag = self.gen_vind_sc()
             precond = self.get_precond(hdiag)
         elif self.deltaS == -1:
-            vind, hdiag = self.gen_vind_sfd()
-            precond = self.get_precond(hdiag)
+            base_vind, hdiag = self.gen_vind_sfd()
+            base_precond = self.get_precond(hdiag)
             csidx, osidx, vsidx = _orbital_indices(self)
-            nocc = len(csidx) + len(osidx)
-            nvir = len(osidx) + len(vsidx)
+            ncs, nos = len(csidx), len(osidx)
+            nocc = ncs + nos
+            nvir = nos + len(vsidx)
+            nstates = min(nstates, hdiag.size - 1)
+            self.nstates = nstates
+            open_diag = np.arange(nos)
+
+            def project(zs):
+                # Remove only the OO identity direction; keep the stored layout.
+                projected = np.array(zs, copy=True)
+                oo = projected.reshape(-1, nocc, nvir)[:, ncs:, :nos]
+                trace = np.trace(oo, axis1=1, axis2=2) / nos
+                oo[:, open_diag, open_diag] -= trace[:, None]
+                return projected
+
+            def vind(zs):
+                return project(base_vind(project(zs)))
+
+            def precond(residual, energy):
+                # Unequal diagonal denominators can reintroduce the OO trace.
+                return project(base_precond(residual, energy))
         elif self.deltaS == 1:
             vind, hdiag = self.gen_vind_sfu()
             precond = self.get_precond(hdiag)
             csidx, _, vsidx = _orbital_indices(self)
             ncs = len(csidx)
             nvs = len(vsidx)
-        else:
-            raise ValueError('deltaS should be -1, 0, or 1')
 
         x0sym = None
         if x0 is None:
             x0 = self.init_guess(hdiag)
+        if self.deltaS == -1:
+            # Davidson's initial QR removes dependencies introduced by projection.
+            x0 = project(x0)
 
         self.converged, self.e, x1 = lr_eigh(
             vind,
@@ -838,9 +1079,6 @@ class NTTDA(TDBase):
             self.xy = [(xi, 0) for xi in x1]
         elif self.deltaS == -1:
             self.xy = [(xi.reshape(nocc, nvir), 0) for xi in x1]
-            mask = abs(self.e) > 1e-8
-            self.e = self.e[mask]
-            self.xy = [xy for xy, keep in zip(self.xy, mask) if keep]
             self.nstates = len(self.e)
         elif self.deltaS == 1:
             self.xy = [(xi.reshape(ncs, nvs), 0) for xi in x1]
@@ -853,9 +1091,199 @@ class NTTDA(TDBase):
         self._finalize()
         return self.e, self.xy
 
+    def get_ab(self):
+        from nest.nttda.get_ab import get_ab
+        return get_ab(self._scf, deltaS=self.deltaS, nobeta=self.nobeta)
+
+    def SOC(self, *others, soctype='SOMF', include_reference=False):
+        """Couple converged NTTDA states through state-interaction SOC."""
+        from nest.soc.nttda import SOC
+        return SOC(self, *others, soctype=soctype, include_reference=include_reference)
+
     gen_vind_sfu = gen_vind_sfu
     gen_vind_sc = gen_vind_sc
     gen_vind_sfd = gen_vind_sfd
+
+
+def _split_amplitudes(x, delta_s, nc, no, nv):
+    """Return CO[i,u], CV[i,a], OO[u,t], OV[u,a], CV0[i,a].
+
+    Formula labels are CO(ui), CV(ai), OO(tu), OV(au), CV0(ai).
+    For deltaS=0 OO is a scalar; for deltaS=+1 only CV is present.
+    """
+    x = np.asarray(x)
+    if delta_s == 1:
+        return None, x.reshape(nc, nv), None, None, None
+    if delta_s == 0:
+        slices = _sc_vector_slices(nc, no, nv)
+        x = x.reshape(slices['CV(0)'].stop)
+        return (x[slices['CO(1)']].reshape(nc, no),
+                x[slices['CV(1)']].reshape(nc, nv),
+                x[slices['OO(1)']][0],
+                x[slices['OV(1)']].reshape(no, nv),
+                x[slices['CV(0)']].reshape(nc, nv))
+    if delta_s == -1:
+        x = x.reshape(nc + no, no + nv)
+        return x[:nc, :no], x[:nc, no:], x[nc:, :no], x[nc:, no:], None
+    raise ValueError('deltaS should be -1, 0, or 1')
+
+
+def _unpack_amplitudes(tdobj, state, nc, no, nv):
+    """Split a stored root using the same layout as the gradient channels."""
+    return _split_amplitudes(tdobj.xy[state][0], tdobj.deltaS, nc, no, nv)
+
+
+def transition_dm(tdobj, bra, ket):
+    """MO matrix gamma[p,q] = <bra|E_pq|ket>, for distinct orthogonal roots.
+
+    Indices here are zero-based. The reference-occupation term vanishes by
+    orthogonality; this is not a diagonal state density matrix.
+    """
+    cs, os, vs = _orbital_indices(tdobj)
+    nc, no, nv = len(cs), len(os), len(vs)
+    s = no * 0.5
+    m = _unpack_amplitudes(tdobj, bra, nc, no, nv)
+    m_co, m_cv, m_oo, m_ov, m_cv0 = (None if b is None else b.conj() for b in m)
+    n_co, n_cv, n_oo, n_ov, n_cv0 = _unpack_amplitudes(tdobj, ket, nc, no, nv)
+    nmo = len(tdobj._scf.mo_occ)
+    gamma = np.zeros((nmo, nmo), dtype=np.result_type(tdobj.xy[bra][0], tdobj.xy[ket][0]))
+    cc, oo, vv = np.ix_(cs, cs), np.ix_(os, os), np.ix_(vs, vs)
+    co, oc = np.ix_(cs, os), np.ix_(os, cs)
+    ov, vo = np.ix_(os, vs), np.ix_(vs, os)
+    cv, vc = np.ix_(cs, vs), np.ix_(vs, cs)
+
+    if tdobj.deltaS == 1:
+        # S+1,S+1: CV(ai)-CV(bj), stored [i,a], [j,b]
+        gamma[cc] -= lib.einsum('ia,ja->ji', m_cv, n_cv)
+        gamma[vv] += lib.einsum('ia,ib->ab', m_cv, n_cv)
+
+    elif tdobj.deltaS == 0:
+        # S,S sector. OO is a scalar; CO[i,u], CV[i,a], OV[u,a], CV0[i,a]
+        f = np.sqrt((s + 1) / (2 * s))
+
+        # OO-CO, OO-OV, OO-CV0 and conjugate
+        gamma[co] -= m_oo * n_co
+        gamma[oc] -= m_co.T * n_oo
+        gamma[ov] += m_oo * n_ov
+        gamma[vo] += m_ov.T * n_oo
+        gamma[cv] -= np.sqrt(2) * m_oo * n_cv0
+        gamma[vc] -= np.sqrt(2) * m_cv0.T * n_oo
+
+        # CO(ui)-CO(vj)
+        gamma[oo] += lib.einsum('iu,iv->uv', m_co, n_co)
+        gamma[cc] -= lib.einsum('iu,ju->ji', m_co, n_co)
+        # CV(ai)-CV(bj)
+        gamma[cc] -= lib.einsum('ia,ja->ji', m_cv, n_cv)
+        gamma[vv] += lib.einsum('ia,ib->ab', m_cv, n_cv)
+        # OV(au)-OV(bv)
+        gamma[oo] -= lib.einsum('ua,va->vu', m_ov, n_ov)
+        gamma[vv] += lib.einsum('ua,ub->ab', m_ov, n_ov)
+        # CV0(ai)-CV0(bj)
+        gamma[cc] -= lib.einsum('ia,ja->ji', m_cv0, n_cv0)
+        gamma[vv] += lib.einsum('ia,ib->ab', m_cv0, n_cv0)
+
+        # CO-CV, OV-CV and conjugate matrix elements
+        gamma[ov] += f * lib.einsum('iu,ib->ub', m_co, n_cv)
+        gamma[vo] += f * lib.einsum('ia,iv->av', m_cv, n_co)
+        gamma[co] -= f * lib.einsum('ua,ja->ju', m_ov, n_cv)
+        gamma[oc] -= f * lib.einsum('ia,va->vi', m_cv, n_ov)
+        # CO-CV0 and OV-CV0
+        gamma[ov] += lib.einsum('iu,ib->ub', m_co, n_cv0) / np.sqrt(2)
+        gamma[vo] += lib.einsum('ia,iv->av', m_cv0, n_co) / np.sqrt(2)
+        gamma[co] += lib.einsum('ua,ja->ju', m_ov, n_cv0) / np.sqrt(2)
+        gamma[oc] += lib.einsum('ia,va->vi', m_cv0, n_ov) / np.sqrt(2)
+
+    elif tdobj.deltaS == -1:
+        # S-1,S-1 sector. OO(tu) is stored [u,t], not formula order
+        a = np.sqrt(2 * s / (2 * s - 1))
+        b = 1 / np.sqrt(2 * s * (2 * s - 1))
+        f = np.sqrt((2 * s + 1) / (2 * s))
+
+        # OO(tu)-OO(vw): stored [u,t], [w,v]
+        gamma[oo] += lib.einsum('ut,uv->tv', m_oo, n_oo)
+        gamma[oo] -= lib.einsum('ut,wt->wu', m_oo, n_oo)
+        # CO(ui)-CO(vj): stored [i,u], [j,v]
+        gamma[oo] += lib.einsum('iu,iv->uv', m_co, n_co)
+        gamma[cc] -= lib.einsum('iu,ju->ji', m_co, n_co)
+        # CV(ai)-CV(bj): stored [i,a], [j,b]
+        gamma[cc] -= lib.einsum('ia,ja->ji', m_cv, n_cv)
+        gamma[vv] += lib.einsum('ia,ib->ab', m_cv, n_cv)
+        # OV(au)-OV(bv): stored [u,a], [v,b]
+        gamma[oo] -= lib.einsum('ua,va->vu', m_ov, n_ov)
+        gamma[vv] += lib.einsum('ua,ub->ab', m_ov, n_ov)
+
+        # OO-CO / OO-OV and conjugate; trace terms use stored OO diagonals
+        gamma[co] += -a * lib.einsum('ut,jt->ju', m_oo, n_co) + b * np.trace(m_oo) * n_co
+        gamma[oc] += -a * lib.einsum('iu,wu->wi', m_co, n_oo) + b * m_co.T * np.trace(n_oo)
+        gamma[ov] += a * lib.einsum('ut,ub->tb', m_oo, n_ov) - b * np.trace(m_oo) * n_ov
+        gamma[vo] += a * lib.einsum('ua,uv->av', m_ov, n_oo) - b * m_ov.T * np.trace(n_oo)
+        # CO-CV and OV-CV, including conjugate matrix elements
+        gamma[ov] += f * lib.einsum('iu,ib->ub', m_co, n_cv)
+        gamma[vo] += f * lib.einsum('ia,iv->av', m_cv, n_co)
+        gamma[co] -= f * lib.einsum('ua,ja->ju', m_ov, n_cv)
+        gamma[oc] -= f * lib.einsum('ia,va->vi', m_cv, n_ov)
+    return gamma
+
+
+def transition_dipole(tdobj, ref=1, state=None):
+    """Return <ref|r|state> in length gauge, shape (n_targets, 3).
+
+    Targets exclude ref. With state=None, n_targets = len(tdobj.xy) - 1;
+    a single target returns shape (1, 3). Scalar state must differ from ref.
+
+    Args:
+        tdobj: NTTDA object with computed roots.
+        ref: 1-based index of reference root.
+        state: 1-based index or sequence of indices of target roots. None for all roots except ref.
+    """
+    if not 1 <= ref <= len(tdobj.xy):
+        raise ValueError('ref must index a computed root (1-based)')
+    if np.isscalar(state) and state == ref:
+        raise ValueError('state must be different from ref')
+    if state is None:
+        states = np.arange(1, len(tdobj.xy) + 1)
+    else:
+        states = np.atleast_1d(state).astype(int)
+    states = states[states != ref] - 1
+    mf = tdobj._scf
+    coeff = np.asarray(mf.mo_coeff)
+    dip_ao = mf.mol.intor_symmetric('int1e_r', comp=3)
+    dip_mo = lib.einsum('up,xuv,vq->xpq', coeff.conj(), dip_ao, coeff)
+    dtype = np.result_type(dip_mo, tdobj.xy[ref - 1][0], *[tdobj.xy[i][0] for i in states])
+    pol = np.empty((len(states), 3), dtype=dtype)
+    for row, ket in enumerate(states):
+        gamma = transition_dm(tdobj, ref - 1, ket)
+        pol[row] = lib.einsum('pq,xpq->x', gamma, dip_mo)
+    return pol
+
+
+def oscillator_strength(tdobj, ref=1, state=None):
+    """Length-gauge oscillator strengths between computed NTTDA roots.
+
+    Uses the same 1-based indices as transition_dipole. Downward transitions
+    retain negative energy differences. A scalar state returns a scalar;
+    a sequence or None returns an array.
+    """
+    if not 1 <= ref <= len(tdobj.xy):
+        raise ValueError('ref must index a computed root (1-based)')
+    if np.isscalar(state) and state == ref:
+        raise ValueError('state must be different from ref')
+    if state is None:
+        states = np.arange(1, len(tdobj.xy) + 1)
+    else:
+        states = np.atleast_1d(state).astype(int)
+    states = states[states != ref] - 1
+    dip = transition_dipole(tdobj, ref, states + 1)
+    de = np.asarray(tdobj.e)[states] - tdobj.e[ref - 1]
+    strength = (2. / 3.) * de * np.einsum('nx,nx->n', dip.conj(), dip).real
+    if np.isscalar(state):
+        return strength[0]
+    else:
+        return strength
+
+
+NTTDA.transition_dipole = transition_dipole
+NTTDA.oscillator_strength = oscillator_strength
 
 
 def _guess_wfnsym_id(tdobj, x_sym, x):
@@ -1080,6 +1508,7 @@ def analyze(tdobj, verbose=None):
 
 
 NTTDA.analyze = analyze
+
 
 dft.roks.ROKS.NTTDA = lib.class_as_method(NTTDA)
 dft.rks_symm.SymAdaptedROKS.NTTDA = lib.class_as_method(NTTDA)

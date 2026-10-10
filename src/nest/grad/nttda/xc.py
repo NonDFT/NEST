@@ -1,10 +1,22 @@
+# Copyright 2026 The NEST Developers. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """LDA, GGA, and meta-GGA quadrature for NTTDA gradients.
 
 This module is channel-neutral: callers provide orbital spaces, transition
 densities, block projections, and response-term coefficients.
 """
-
-from dataclasses import dataclass
 
 import numpy as np
 
@@ -12,16 +24,9 @@ from pyscf import lib
 from pyscf.dft.gen_grid import NBINS
 from pyscf.dft.numint import _dot_ao_ao_sparse, _scale_ao_sparse
 from pyscf.grad import tdrks as tdrks_grad
+from nest.aocscf import AverageOccupationROKS, SymAdaptedAverageOccupationROKS
 
-
-
-# Shared result and projection helpers
-
-@dataclass(frozen=True)
-class XCGradientTerms:
-    q_alpha: np.ndarray
-    q_beta: np.ndarray
-    direct: np.ndarray
+from .common import project_channel_potentials, reference_spin_densities, reference_spin_occupations
 
 
 # AO feature algebra
@@ -294,82 +299,20 @@ def mgga_eval_matrix(mol, ao, weights, mask):
     return output[0]
 
 
-# LDA quadrature
-
-def _lda_fref_kref(mf, ao0, mask):
-    ni = mf._numint
-    rho0 = ni.eval_rho2(
-        mf.mol, ao0, mf.mo_coeff, mf.mo_occ, mask, "LDA",
-        with_lapl=False,
-    ) * 0.5
-    fxc, kxc = ni.eval_xc_eff(
-        mf.xc, (rho0, rho0), deriv=3, xctype="LDA", spin=1,
-    )[2:4]
-    fref = 0.5 * (
-        fxc[0, 0, 0, 0] - fxc[0, 0, 1, 0]
-        - fxc[1, 0, 0, 0] + fxc[1, 0, 1, 0]
-    )
-    kref_alpha = 0.5 * (
-        kxc[0, 0, 0, 0, 0, 0] - kxc[0, 0, 1, 0, 0, 0]
-        - kxc[1, 0, 0, 0, 0, 0] + kxc[1, 0, 1, 0, 0, 0]
-    )
-    kref_beta = 0.5 * (
-        kxc[0, 0, 0, 0, 1, 0] - kxc[0, 0, 1, 0, 1, 0]
-        - kxc[1, 0, 0, 0, 1, 0] + kxc[1, 0, 1, 0, 1, 0]
-    )
-    return fref, kref_alpha, kref_beta
-
-
 def _lda_matrix(ao0, weights):
     return ao0.T @ (ao0 * np.asarray(weights)[:, None])
-
-
-def _unpack_channel_data(channel_data):
-    """Return channel data plus the spin carried by each target orbital.
-
-    Historical ``deltaS=0/-1`` callers use beta-spin targets and pass the
-    original five-item tuple.  The spin-raising channel appends ``"alpha"``
-    because its sole C->V excitation removes beta spin and creates alpha spin.
-    """
-    if len(channel_data) == 5:
-        return (*channel_data, "beta")
-    if len(channel_data) == 6:
-        return tuple(channel_data)
-    raise ValueError("NTTDA XC channel data must contain five or six items")
-
-
-def _project_channel_potentials(
-        tdobj, potentials, blocks, target_spin="beta"):
-    """Project transition-factor potentials for any NTTDA spin channel."""
-    mo = np.asarray(tdobj._scf.mo_coeff)
-    q_alpha = np.zeros((mo.shape[1], mo.shape[1]))
-    q_beta = np.zeros_like(q_alpha)
-    for label, (target, source, coefficient) in blocks.items():
-        potential = mo.conj().T @ potentials[label] @ mo
-        if target_spin == "beta":
-            q_beta[:, target] += potential[:, source] @ coefficient.T
-            q_alpha[:, source] += potential[target, :].T @ coefficient
-        elif target_spin == "alpha":
-            q_alpha[:, target] += potential[:, source] @ coefficient.T
-            q_beta[:, source] += potential[target, :].T @ coefficient
-        else:
-            raise ValueError("target_spin must be 'alpha' or 'beta'")
-    return q_alpha, q_beta
 
 
 def _add_reference_q(tdobj, q_alpha, q_beta, matrix_alpha, matrix_beta):
     mf = tdobj._scf
     mo = np.asarray(mf.mo_coeff)
-    occupied_alpha = np.flatnonzero(mf.mo_occ > 0)
-    occupied_beta = np.flatnonzero(mf.mo_occ == 2)
-    q_alpha[:, occupied_alpha] += (
-        mo.conj().T @ (matrix_alpha + matrix_alpha.T)
-        @ mo[:, occupied_alpha]
-    )
-    q_beta[:, occupied_beta] += (
-        mo.conj().T @ (matrix_beta + matrix_beta.T)
-        @ mo[:, occupied_beta]
-    )
+    occupation_alpha, occupation_beta = reference_spin_occupations(tdobj)
+    q_alpha += (
+        mo.conj().T @ (matrix_alpha + matrix_alpha.T) @ mo
+    ) * occupation_alpha[None, :]
+    q_beta += (
+        mo.conj().T @ (matrix_beta + matrix_beta.T) @ mo
+    ) * occupation_beta[None, :]
 
 
 def _spin_probe_stacks(probe_alpha, probe_beta):
@@ -388,19 +331,13 @@ def _spin_probe_stacks(probe_alpha, probe_beta):
     return probe_alpha, probe_beta, single_probe
 
 
-def _xc_density(ni, mol, ao, density, mask, xctype):
+def _xc_density(ni, mol, ao, density, mask, xctype, hermi=1):
     ao_values = ao[0] if xctype == "LDA" else ao
     rho = ni.eval_rho(
-        mol, ao_values, density, mask, xctype, hermi=1,
+        mol, ao_values, density, mask, xctype, hermi=hermi,
         with_lapl=False,
     )
     return rho[None] if rho.ndim == 1 else rho
-
-
-def _xc_ao_center_derivative(ao, p0, p1, xyz, xctype):
-    return _compact_ao_center_derivative(
-        ao, p0, p1, xyz, xctype,
-    )
 
 
 def _xc_density_derivatives(
@@ -498,14 +435,12 @@ def _response_density_stack(
 def _response_density_derivatives(
         ao, density_stack, labels, p0, p1, xyz, xctype):
     """Generate every channel/reference density derivative from one AO delta."""
-    ao_center_derivative = _xc_ao_center_derivative(
+    ao_center_derivative = _compact_ao_center_derivative(
         ao, p0, p1, xyz, xctype,
     )
     derivatives = _xc_density_derivatives(
         ao, density_stack, p0, p1, xctype, ao_center_derivative,
     )
-    if xctype == "LDA":
-        derivatives = derivatives[:, 0]
     channel_count = len(labels)
     channel_derivatives = dict(zip(
         labels, derivatives[:channel_count],
@@ -567,7 +502,7 @@ def _contract_vxc_derivative(
         for k, atom in enumerate(atmlst):
             p0, p1 = offsets[atom][2:]
             for xyz in range(3):
-                ao_center_derivative = _xc_ao_center_derivative(
+                ao_center_derivative = _compact_ao_center_derivative(
                     ao, p0, p1, xyz, xctype,
                 )
                 density_derivative = _xc_density_derivatives(
@@ -626,259 +561,10 @@ def contract_mgga_vxc_derivative(
     )
 
 
-def lda_response_terms(
-        gradient_driver, tdobj, channel_data, atmlst=None,
-        with_direct=True):
-    """Analytic LDA M/direct terms for the ``vref0/vref1`` scalar."""
-    mf = tdobj._scf
-    mol = mf.mol
-    ni = mf._numint
-    if atmlst is None:
-        atmlst = range(mol.natm)
-    atmlst = tuple(atmlst)
-    (
-        _spaces, _amplitudes, densities, blocks, response_terms, target_spin,
-    ) = _unpack_channel_data(channel_data)
-    coefficients = tuple(
-        (term.target, term.source, term.vref0 + term.vref1)
-        for term in response_terms
-        if term.vref0 + term.vref1
-    )
-    nao = mol.nao_nr()
-    potentials = {label: np.zeros((nao, nao)) for label in densities}
-    reference_alpha = np.zeros((nao, nao))
-    reference_beta = np.zeros_like(reference_alpha)
-    direct = np.zeros((len(atmlst), 3))
-    mo = np.asarray(mf.mo_coeff)
-    density_alpha = mo[:, mf.mo_occ > 0] @ mo[:, mf.mo_occ > 0].T
-    density_beta = mo[:, mf.mo_occ == 2] @ mo[:, mf.mo_occ == 2].T
-    density_labels, density_stack = _response_density_stack(
-        densities, density_alpha, density_beta,
-    )
-    offsets = mol.offset_nr_by_atom()
-
-    for ao, mask, weights, _coords in ni.block_loop(
-            mol, mf.grids, nao, 1, max_memory=gradient_driver.max_memory):
-        ao0 = ao[0]
-        fref, kref_alpha, kref_beta = _lda_fref_kref(mf, ao0, mask)
-        rho = {
-            label: ni.eval_rho(
-                mol, ao0, density, mask, "LDA", hermi=0,
-                with_lapl=False,
-            )
-            for label, density in densities.items()
-        }
-        potential_weights = {
-            label: np.zeros_like(weights) for label in densities
-        }
-        pair_alpha = np.zeros_like(weights)
-        pair_beta = np.zeros_like(weights)
-        for target, source, coefficient in coefficients:
-            potential_weights[target] += coefficient * fref * rho[source]
-            potential_weights[source] += coefficient * fref * rho[target]
-            pair = coefficient * rho[target] * rho[source]
-            pair_alpha += kref_alpha * pair
-            pair_beta += kref_beta * pair
-        potential_weight_stack = np.asarray([
-            potential_weights[label] for label in density_labels
-        ])
-        for label in potentials:
-            potentials[label] += _lda_matrix(
-                ao0, weights * potential_weights[label],
-            )
-        reference_alpha += _lda_matrix(ao0, weights * pair_alpha)
-        reference_beta += _lda_matrix(ao0, weights * pair_beta)
-
-        if not with_direct:
-            continue
-        for k, atom in enumerate(atmlst):
-            p0, p1 = offsets[atom][2:]
-            for xyz in range(3):
-                drho, drho_alpha, drho_beta, _ao_delta = (
-                    _response_density_derivatives(
-                        ao, density_stack, density_labels,
-                        p0, p1, xyz, "LDA",
-                    )
-                )
-                drho_stack = np.asarray([
-                    drho[label] for label in density_labels
-                ])
-                value = lib.einsum(
-                    "ng,ng,g->",
-                    potential_weight_stack, drho_stack, weights,
-                )
-                value += lib.einsum(
-                    "g,g,g->", pair_alpha, drho_alpha, weights,
-                )
-                value += lib.einsum(
-                    "g,g,g->", pair_beta, drho_beta, weights,
-                )
-                direct[k, xyz] += value
-
-    q_alpha, q_beta = _project_channel_potentials(
-        tdobj, potentials, blocks, target_spin=target_spin,
-    )
-    _add_reference_q(
-        tdobj, q_alpha, q_beta, reference_alpha, reference_beta,
-    )
-    return XCGradientTerms(q_alpha, q_beta, direct)
-
-
-def lda_fockz_terms(
-        gradient_driver, tdobj, spaces, pz, atmlst=None,
-        with_direct=True):
-    """LDA response/direct derivative of ``Pz:Fz`` excluding Pz projection."""
-    mf = tdobj._scf
-    mol = mf.mol
-    ni = mf._numint
-    if atmlst is None:
-        atmlst = range(mol.natm)
-    atmlst = tuple(atmlst)
-    density_open = spaces.c_open @ spaces.c_open.T
-    pz = np.asarray(pz)
-    pz_symmetric = 0.5 * (pz + pz.T)
-    nao = mol.nao_nr()
-    open_potential = np.zeros((nao, nao))
-    reference_alpha = np.zeros((nao, nao))
-    reference_beta = np.zeros_like(reference_alpha)
-    direct = np.zeros((len(atmlst), 3))
-    mo = np.asarray(mf.mo_coeff)
-    density_alpha = mo[:, mf.mo_occ > 0] @ mo[:, mf.mo_occ > 0].T
-    density_beta = mo[:, mf.mo_occ == 2] @ mo[:, mf.mo_occ == 2].T
-    density_stack = np.asarray((
-        pz_symmetric, density_open, density_alpha, density_beta,
-    ))
-    offsets = mol.offset_nr_by_atom()
-
-    for ao, mask, weights, _coords in ni.block_loop(
-            mol, mf.grids, nao, 1, max_memory=gradient_driver.max_memory):
-        ao0 = ao[0]
-        fref, kref_alpha, kref_beta = _lda_fref_kref(mf, ao0, mask)
-        rho_pz = ni.eval_rho(
-            mol, ao0, pz_symmetric, mask, "LDA", hermi=1,
-            with_lapl=False,
-        )
-        rho_open = ni.eval_rho(
-            mol, ao0, density_open, mask, "LDA", hermi=1,
-            with_lapl=False,
-        )
-        open_potential += _lda_matrix(
-            ao0, 0.5 * weights * fref * rho_pz,
-        )
-        pair = 0.5 * rho_pz * rho_open
-        reference_alpha += _lda_matrix(
-            ao0, weights * kref_alpha * pair,
-        )
-        reference_beta += _lda_matrix(
-            ao0, weights * kref_beta * pair,
-        )
-        if not with_direct:
-            continue
-        for k, atom in enumerate(atmlst):
-            p0, p1 = offsets[atom][2:]
-            derivative_batches = _hermitian_density_derivative_batches(
-                ao, density_stack, p0, p1, "LDA",
-            )
-            for xyz, derivatives in enumerate(derivative_batches):
-                drho_pz, drho_open, drho_alpha, drho_beta = (
-                    derivatives[:, 0]
-                )
-                direct[k, xyz] += 0.5 * np.dot(
-                    weights,
-                    fref * (
-                        drho_pz * rho_open + rho_pz * drho_open
-                    )
-                    + rho_pz * rho_open * (
-                        kref_alpha * drho_alpha
-                        + kref_beta * drho_beta
-                    ),
-                )
-
-    q_alpha = np.zeros((mo.shape[1], mo.shape[1]))
-    q_beta = np.zeros_like(q_alpha)
-    q_alpha[:, spaces.open] += (
-        mo.conj().T @ (open_potential + open_potential.T)
-        @ spaces.c_open
-    )
-    _add_reference_q(
-        tdobj, q_alpha, q_beta, reference_alpha, reference_beta,
-    )
-    return XCGradientTerms(q_alpha, q_beta, direct)
-
-
-def lda_nobeta_reference_q(tdobj, p0, max_memory=None):
-    """Reference-density correction for the equal-spin ``nobeta`` Fock."""
-    mf = tdobj._scf
-    mo = np.asarray(mf.mo_coeff)
-    nmo = mo.shape[1]
-    q_alpha = np.zeros((nmo, nmo))
-    q_beta = np.zeros_like(q_alpha)
-    if not tdobj.nobeta:
-        return q_alpha, q_beta
-    if max_memory is None:
-        max_memory = tdobj.max_memory
-    ni = mf._numint
-    mol = mf.mol
-    nao = mol.nao_nr()
-    density_alpha = mo[:, mf.mo_occ > 0] @ mo[:, mf.mo_occ > 0].T
-    density_beta = mo[:, mf.mo_occ == 2] @ mo[:, mf.mo_occ == 2].T
-    density0 = 0.5 * (density_alpha + density_beta)
-    p0 = 0.5 * (np.asarray(p0) + np.asarray(p0).T)
-    matrix_alpha = np.zeros((nao, nao))
-    matrix_beta = np.zeros_like(matrix_alpha)
-    for ao, mask, weights, _coords in ni.block_loop(
-            mol, mf.grids, nao, 1, max_memory=max_memory):
-        ao0 = ao[0]
-        rho_p = ni.eval_rho(
-            mol, ao0, p0, mask, "LDA", hermi=1, with_lapl=False,
-        )
-        rho_alpha = ni.eval_rho(
-            mol, ao0, density_alpha, mask, "LDA", hermi=1,
-            with_lapl=False,
-        )
-        rho_beta = ni.eval_rho(
-            mol, ao0, density_beta, mask, "LDA", hermi=1,
-            with_lapl=False,
-        )
-        rho0 = ni.eval_rho(
-            mol, ao0, density0, mask, "LDA", hermi=1,
-            with_lapl=False,
-        )
-        fxc_actual = ni.eval_xc_eff(
-            mf.xc, (rho_alpha, rho_beta), deriv=2,
-            xctype="LDA", spin=1,
-        )[2]
-        fxc_equal = ni.eval_xc_eff(
-            mf.xc, (rho0, rho0), deriv=2,
-            xctype="LDA", spin=1,
-        )[2]
-        equal_derivative = 0.25 * (
-            fxc_equal[0, 0, 0, 0] + fxc_equal[0, 0, 1, 0]
-            + fxc_equal[1, 0, 0, 0] + fxc_equal[1, 0, 1, 0]
-        )
-        actual_alpha = 0.5 * (
-            fxc_actual[0, 0, 0, 0] + fxc_actual[1, 0, 0, 0]
-        )
-        actual_beta = 0.5 * (
-            fxc_actual[0, 0, 1, 0] + fxc_actual[1, 0, 1, 0]
-        )
-        matrix_alpha += _lda_matrix(
-            ao0, weights * rho_p * (equal_derivative - actual_alpha),
-        )
-        matrix_beta += _lda_matrix(
-            ao0, weights * rho_p * (equal_derivative - actual_beta),
-        )
-    _add_reference_q(
-        tdobj, q_alpha, q_beta, matrix_alpha, matrix_beta,
-    )
-    return q_alpha, q_beta
-
-
-# GGA quadrature
-
-def _gga_fref_kref(mf, rho0):
+# XC quadrature
+def _reference_fref_kref(mf, rho0, xctype):
     fxc, kxc = mf._numint.eval_xc_eff(
-        mf.xc, (rho0, rho0), deriv=3, xctype="GGA", spin=1,
+        mf.xc, (rho0, rho0), deriv=3, xctype=xctype, spin=1,
     )[2:4]
     fref = 0.5 * (
         fxc[0, :, 0] - fxc[0, :, 1]
@@ -895,22 +581,30 @@ def _gga_fref_kref(mf, rho0):
     return fref, kref_alpha, kref_beta
 
 
-def gga_response_terms(
-        gradient_driver, tdobj, channel_data, atmlst=None,
-        with_direct=True):
-    """GGA ``vref0/vref1`` M matrix and fixed-grid skeleton derivative."""
+def response_terms(
+        gradient_driver, tdobj, densities, blocks, terms, atmlst=None):
+    """Return ``(q_alpha, q_beta, direct)`` for the XC response scalar.
+
+    The Q matrices differentiate MO coefficients; ``direct`` differentiates
+    AO centers on a fixed grid. An empty ``atmlst`` requests Q matrices only.
+    """
     mf = tdobj._scf
+    xctype = mf._numint._xc_type(mf.xc)
+    add_matrix, eval_matrix = _xc_matrix_builders(xctype)
+    if xctype == "LDA":
+        nvar = 1
+    elif xctype == "GGA":
+        nvar, pair_potential, pair_cross = 4, gga_pair_potential, gga_pair_kernel_cross
+    else:
+        nvar, pair_potential, pair_cross = 5, mgga_pair_potential, mgga_pair_kernel_cross
     mol = mf.mol
     ni = mf._numint
     if atmlst is None:
         atmlst = range(mol.natm)
     atmlst = tuple(atmlst)
-    (
-        _spaces, _amplitudes, densities, blocks, terms, target_spin,
-    ) = _unpack_channel_data(channel_data)
     pair_labels = tuple(
         label for label in densities
-        if any(
+        if xctype != "LDA" and any(
             term.vref1 and label in (term.target, term.source)
             for term in terms
         )
@@ -924,57 +618,52 @@ def gga_response_terms(
     reference_beta = np.zeros_like(reference_alpha)
     direct = np.zeros((len(atmlst), 3))
     mo = np.asarray(mf.mo_coeff)
-    density_alpha = mo[:, mf.mo_occ > 0] @ mo[:, mf.mo_occ > 0].T
-    density_beta = mo[:, mf.mo_occ == 2] @ mo[:, mf.mo_occ == 2].T
+    density_alpha, density_beta = reference_spin_densities(tdobj)
     density_labels, density_stack = _response_density_stack(
         densities, density_alpha, density_beta,
     )
     offsets = mol.offset_nr_by_atom()
-    sparse = sparse_context(mf)
+    sparse = sparse_context(mf) if xctype != "LDA" else None
+    ao_deriv = 1 if xctype == "LDA" else 2
 
     for ao, mask, weights, _coords in ni.block_loop(
-            mol, mf.grids, nao, 2, max_memory=gradient_driver.max_memory):
+            mol, mf.grids, nao, ao_deriv, max_memory=gradient_driver.max_memory):
         rho0 = ni.eval_rho2(
-            mol, ao, mo, mf.mo_occ, mask, "GGA", with_lapl=False,
+            mol, ao[0] if xctype == "LDA" else ao, mo, mf.mo_occ,
+            mask, xctype, with_lapl=False,
         ) * 0.5
-        fref, kref_alpha, kref_beta = _gga_fref_kref(mf, rho0)
+        fref, kref_alpha, kref_beta = _reference_fref_kref(mf, rho0, xctype)
         rho = {
-            label: ni.eval_rho(
-                mol, ao, density, mask, "GGA", hermi=0,
-                with_lapl=False,
-            )
+            label: _xc_density(ni, mol, ao, density, mask, xctype, hermi=0)
             for label, density in densities.items()
         }
+        pairs, pair_potentials = {}, {}
         if pair_labels:
-            pair_values, contracted_pair_ao = pair_feature_batches(
-                ao, pair_density_stack,
-            )
-        else:
-            pair_values = ()
-            contracted_pair_ao = None
-        pairs = dict(zip(pair_labels, pair_values))
-        pair_potentials = {
-            label: gga_pair_potential(fref, pairs[label])
-            for label in pair_labels
-        }
+            pair_values, contracted_pair_ao = pair_feature_batches(ao, pair_density_stack)
+            pairs = dict(zip(pair_labels, pair_values))
+            pair_potentials = {
+                label: pair_potential(fref, pairs[label]) for label in pair_labels
+            }
         ordinary_weights = {
-            label: np.zeros((4, weights.size)) for label in densities
+            label: np.zeros((nvar, weights.size)) for label in densities
         }
         special_weights = {
             label: np.zeros((4, 4, weights.size)) for label in pair_labels
         }
-        reference_weights_alpha = np.zeros((4, weights.size))
+        reference_weights_alpha = np.zeros((nvar, weights.size))
         reference_weights_beta = np.zeros_like(reference_weights_alpha)
 
         for term in terms:
-            if term.vref0:
-                ordinary_weights[term.target] += term.vref0 * lib.einsum(
+            # In LDA the two kernels coincide; no pair-feature correction remains.
+            ordinary_coefficient = term.vref0 + term.vref1 if xctype == "LDA" else term.vref0
+            if ordinary_coefficient:
+                ordinary_weights[term.target] += ordinary_coefficient * lib.einsum(
                     "xyg,yg->xg", fref, rho[term.source],
                 )
-                ordinary_weights[term.source] += term.vref0 * lib.einsum(
+                ordinary_weights[term.source] += ordinary_coefficient * lib.einsum(
                     "xyg,xg->yg", fref, rho[term.target],
                 )
-                pair = term.vref0 * lib.einsum(
+                pair = ordinary_coefficient * lib.einsum(
                     "xg,yg->xyg", rho[term.target], rho[term.source],
                 )
                 reference_weights_alpha += lib.einsum(
@@ -983,14 +672,14 @@ def gga_response_terms(
                 reference_weights_beta += lib.einsum(
                     "xyg,xyzg->zg", pair, kref_beta,
                 )
-            if term.vref1:
+            if xctype != "LDA" and term.vref1:
                 special_weights[term.target] += (
                     term.vref1 * pair_potentials[term.source]
                 )
                 special_weights[term.source] += (
                     term.vref1 * pair_potentials[term.target]
                 )
-                pair = term.vref1 * gga_pair_kernel_cross(
+                pair = term.vref1 * pair_cross(
                     pairs[term.target], pairs[term.source],
                 )
                 reference_weights_alpha += lib.einsum(
@@ -1007,7 +696,7 @@ def gga_response_terms(
         ])
 
         for label in potentials:
-            add_gga_matrix(
+            add_matrix(
                 mol, potentials[label], ao,
                 ordinary_weights[label] * weights, mask, sparse,
             )
@@ -1015,22 +704,20 @@ def gga_response_terms(
             potentials[label] += pair_matrix(
                 mol, ao, mask, special_weights[label] * weights, sparse,
             )
-        reference_alpha += gga_eval_matrix(
+        reference_alpha += eval_matrix(
             mol, ao, reference_weights_alpha * weights, mask,
         )
-        reference_beta += gga_eval_matrix(
+        reference_beta += eval_matrix(
             mol, ao, reference_weights_beta * weights, mask,
         )
 
-        if not with_direct:
-            continue
         for k, atom in enumerate(atmlst):
             p0, p1 = offsets[atom][2:]
             for xyz in range(3):
                 drho, drho_alpha, drho_beta, ao_delta = (
                     _response_density_derivatives(
                         ao, density_stack, density_labels,
-                        p0, p1, xyz, "GGA",
+                        p0, p1, xyz, xctype,
                     )
                 )
                 drho_stack = np.asarray([
@@ -1056,20 +743,44 @@ def gga_response_terms(
                     )
                 direct[k, xyz] += value
 
-    q_alpha, q_beta = _project_channel_potentials(
-        tdobj, potentials, blocks, target_spin=target_spin,
+    q_alpha, q_beta = project_channel_potentials(
+        tdobj, potentials, blocks,
     )
     _add_reference_q(
         tdobj, q_alpha, q_beta, reference_alpha, reference_beta,
     )
-    return XCGradientTerms(q_alpha, q_beta, direct)
+    return q_alpha, q_beta, direct
 
 
-def gga_fockz_terms(
-        gradient_driver, tdobj, spaces, pz, atmlst=None,
-        with_direct=True):
-    """GGA derivative of ``Pz:Fz`` excluding its explicit Pz projection."""
+def _lda_eval_matrix(mol, ao, weights, mask):
+    """LDA potential with the same feature axis as GGA/meta-GGA."""
+    return _lda_matrix(ao[0], weights[0])
+
+
+def _add_lda_matrix(mol, output, ao, weights, mask, sparse):
+    output += _lda_eval_matrix(mol, ao, weights, mask)
+
+
+def _xc_matrix_builders(xctype):
+    """Feature-potential builders; LDA retains one density feature."""
+    if xctype == "LDA":
+        return _add_lda_matrix, _lda_eval_matrix
+    if xctype == "GGA":
+        return add_gga_matrix, gga_eval_matrix
+    if xctype == "MGGA":
+        return add_mgga_matrix, mgga_eval_matrix
+    raise NotImplementedError("Unsupported XC type %s" % xctype)
+
+
+def fockz_terms(
+        gradient_driver, tdobj, spaces, pz, atmlst=None):
+    """Return ``(q_alpha, q_beta, direct)`` for the XC part of ``Pz:Fz``.
+
+    The explicit Pz projection is already included by ``fock_projection_q``.
+    """
     mf = tdobj._scf
+    xctype = mf._numint._xc_type(mf.xc)
+    add_matrix, eval_matrix = _xc_matrix_builders(xctype)
     mol = mf.mol
     ni = mf._numint
     if atmlst is None:
@@ -1083,28 +794,24 @@ def gga_fockz_terms(
     reference_beta = np.zeros_like(reference_alpha)
     direct = np.zeros((len(atmlst), 3))
     mo = np.asarray(mf.mo_coeff)
-    density_alpha = mo[:, mf.mo_occ > 0] @ mo[:, mf.mo_occ > 0].T
-    density_beta = mo[:, mf.mo_occ == 2] @ mo[:, mf.mo_occ == 2].T
+    density_alpha, density_beta = reference_spin_densities(tdobj)
     density_stack = np.asarray((
         pz, density_open, density_alpha, density_beta,
     ))
     offsets = mol.offset_nr_by_atom()
-    sparse = sparse_context(mf)
+    sparse = sparse_context(mf) if xctype != "LDA" else None
+    ao_deriv = 1 if xctype == "LDA" else 2
 
     for ao, mask, weights, _coords in ni.block_loop(
-            mol, mf.grids, nao, 2, max_memory=gradient_driver.max_memory):
+            mol, mf.grids, nao, ao_deriv, max_memory=gradient_driver.max_memory):
         rho0 = ni.eval_rho2(
-            mol, ao, mo, mf.mo_occ, mask, "GGA", with_lapl=False,
+            mol, ao[0] if xctype == "LDA" else ao, mo, mf.mo_occ,
+            mask, xctype, with_lapl=False,
         ) * 0.5
-        fref, kref_alpha, kref_beta = _gga_fref_kref(mf, rho0)
-        rho_pz = ni.eval_rho(
-            mol, ao, pz, mask, "GGA", hermi=1, with_lapl=False,
-        )
-        rho_open = ni.eval_rho(
-            mol, ao, density_open, mask, "GGA", hermi=1,
-            with_lapl=False,
-        )
-        add_gga_matrix(
+        fref, kref_alpha, kref_beta = _reference_fref_kref(mf, rho0, xctype)
+        rho_pz = _xc_density(ni, mol, ao, pz, mask, xctype)
+        rho_open = _xc_density(ni, mol, ao, density_open, mask, xctype)
+        add_matrix(
             mol,
             open_potential,
             ao,
@@ -1113,20 +820,18 @@ def gga_fockz_terms(
             sparse,
         )
         pair = 0.5 * lib.einsum("xg,yg->xyg", rho_pz, rho_open)
-        reference_alpha += gga_eval_matrix(
+        reference_alpha += eval_matrix(
             mol, ao, lib.einsum("xyg,xyzg->zg", pair, kref_alpha) * weights,
             mask,
         )
-        reference_beta += gga_eval_matrix(
+        reference_beta += eval_matrix(
             mol, ao, lib.einsum("xyg,xyzg->zg", pair, kref_beta) * weights,
             mask,
         )
-        if not with_direct:
-            continue
         for k, atom in enumerate(atmlst):
             p0, p1 = offsets[atom][2:]
             derivative_batches = _hermitian_density_derivative_batches(
-                ao, density_stack, p0, p1, "GGA",
+                ao, density_stack, p0, p1, xctype,
             )
             for xyz, derivatives in enumerate(derivative_batches):
                 drho_pz, drho_open, drho_alpha, drho_beta = derivatives
@@ -1153,50 +858,42 @@ def gga_fockz_terms(
     _add_reference_q(
         tdobj, q_alpha, q_beta, reference_alpha, reference_beta,
     )
-    return XCGradientTerms(q_alpha, q_beta, direct)
+    return q_alpha, q_beta, direct
 
 
-def gga_nobeta_reference_q(tdobj, p0, max_memory=None):
-    """Reference-density response of the GGA equal-spin common Fock."""
+def nobeta_reference_q(tdobj, p0, max_memory=None):
+    """Reference-density response of the LDA/GGA/meta-GGA equal-spin common Fock."""
     mf = tdobj._scf
+    xctype = mf._numint._xc_type(mf.xc)
+    _add_matrix, eval_matrix = _xc_matrix_builders(xctype)
     mo = np.asarray(mf.mo_coeff)
     q_alpha = np.zeros((mo.shape[1], mo.shape[1]))
     q_beta = np.zeros_like(q_alpha)
-    if not tdobj.nobeta:
+    if not tdobj.nobeta or isinstance(mf, (AverageOccupationROKS, SymAdaptedAverageOccupationROKS)):
         return q_alpha, q_beta
     if max_memory is None:
         max_memory = tdobj.max_memory
     ni = mf._numint
     mol = mf.mol
-    density_alpha = mo[:, mf.mo_occ > 0] @ mo[:, mf.mo_occ > 0].T
-    density_beta = mo[:, mf.mo_occ == 2] @ mo[:, mf.mo_occ == 2].T
+    density_alpha, density_beta = reference_spin_densities(tdobj)
     density0 = 0.5 * (density_alpha + density_beta)
     p0 = 0.5 * (np.asarray(p0) + np.asarray(p0).T)
     matrix_alpha = np.zeros((mol.nao_nr(), mol.nao_nr()))
     matrix_beta = np.zeros_like(matrix_alpha)
+    ao_deriv = 1 if xctype == "LDA" else 2
     for ao, mask, weights, _coords in ni.block_loop(
-            mol, mf.grids, mol.nao_nr(), 2, max_memory=max_memory):
-        rho_p = ni.eval_rho(
-            mol, ao, p0, mask, "GGA", hermi=1, with_lapl=False,
-        )
-        rho_alpha = ni.eval_rho(
-            mol, ao, density_alpha, mask, "GGA", hermi=1,
-            with_lapl=False,
-        )
-        rho_beta = ni.eval_rho(
-            mol, ao, density_beta, mask, "GGA", hermi=1,
-            with_lapl=False,
-        )
-        rho_equal = ni.eval_rho(
-            mol, ao, density0, mask, "GGA", hermi=1, with_lapl=False,
+            mol, mf.grids, mol.nao_nr(), ao_deriv, max_memory=max_memory):
+        rho_p, rho_alpha, rho_beta, rho_equal = (
+            _xc_density(ni, mol, ao, density, mask, xctype)
+            for density in (p0, density_alpha, density_beta, density0)
         )
         fxc_actual = ni.eval_xc_eff(
             mf.xc, (rho_alpha, rho_beta), deriv=2,
-            xctype="GGA", spin=1,
+            xctype=xctype, spin=1,
         )[2]
         fxc_equal = ni.eval_xc_eff(
             mf.xc, (rho_equal, rho_equal), deriv=2,
-            xctype="GGA", spin=1,
+            xctype=xctype, spin=1,
         )[2]
         equal = 0.25 * (
             fxc_equal[0, :, 0] + fxc_equal[0, :, 1]
@@ -1208,363 +905,13 @@ def gga_nobeta_reference_q(tdobj, p0, max_memory=None):
         actual_beta = 0.5 * (
             fxc_actual[0, :, 1] + fxc_actual[1, :, 1]
         )
-        matrix_alpha += gga_eval_matrix(
+        matrix_alpha += eval_matrix(
             mol,
             ao,
             lib.einsum("xg,xzg->zg", rho_p, equal - actual_alpha) * weights,
             mask,
         )
-        matrix_beta += gga_eval_matrix(
-            mol,
-            ao,
-            lib.einsum("xg,xzg->zg", rho_p, equal - actual_beta) * weights,
-            mask,
-        )
-    _add_reference_q(tdobj, q_alpha, q_beta, matrix_alpha, matrix_beta)
-    return q_alpha, q_beta
-
-
-# meta-GGA quadrature
-
-def _mgga_fref_kref(mf, rho0):
-    fxc, kxc = mf._numint.eval_xc_eff(
-        mf.xc, (rho0, rho0), deriv=3, xctype="MGGA", spin=1,
-    )[2:4]
-    fref = 0.5 * (
-        fxc[0, :, 0] - fxc[0, :, 1]
-        - fxc[1, :, 0] + fxc[1, :, 1]
-    )
-    kref_alpha = 0.5 * (
-        kxc[0, :, 0, :, 0] - kxc[0, :, 1, :, 0]
-        - kxc[1, :, 0, :, 0] + kxc[1, :, 1, :, 0]
-    )
-    kref_beta = 0.5 * (
-        kxc[0, :, 0, :, 1] - kxc[0, :, 1, :, 1]
-        - kxc[1, :, 0, :, 1] + kxc[1, :, 1, :, 1]
-    )
-    return fref, kref_alpha, kref_beta
-
-
-def mgga_response_terms(
-        gradient_driver, tdobj, channel_data, atmlst=None,
-        with_direct=True):
-    """MGGA ``vref0/vref1`` M matrix and fixed-grid skeleton derivative."""
-    mf = tdobj._scf
-    mol = mf.mol
-    ni = mf._numint
-    if atmlst is None:
-        atmlst = range(mol.natm)
-    atmlst = tuple(atmlst)
-    (
-        _spaces, _amplitudes, densities, blocks, terms, target_spin,
-    ) = _unpack_channel_data(channel_data)
-    pair_labels = tuple(
-        label for label in densities
-        if any(
-            term.vref1 and label in (term.target, term.source)
-            for term in terms
-        )
-    )
-    pair_density_stack = np.asarray([
-        densities[label] for label in pair_labels
-    ])
-    nao = mol.nao_nr()
-    potentials = {label: np.zeros((nao, nao)) for label in densities}
-    reference_alpha = np.zeros((nao, nao))
-    reference_beta = np.zeros_like(reference_alpha)
-    direct = np.zeros((len(atmlst), 3))
-    mo = np.asarray(mf.mo_coeff)
-    density_alpha = mo[:, mf.mo_occ > 0] @ mo[:, mf.mo_occ > 0].T
-    density_beta = mo[:, mf.mo_occ == 2] @ mo[:, mf.mo_occ == 2].T
-    density_labels, density_stack = _response_density_stack(
-        densities, density_alpha, density_beta,
-    )
-    offsets = mol.offset_nr_by_atom()
-    sparse = sparse_context(mf)
-
-    for ao, mask, weights, _coords in ni.block_loop(
-            mol, mf.grids, nao, 2, max_memory=gradient_driver.max_memory):
-        rho0 = ni.eval_rho2(
-            mol, ao, mo, mf.mo_occ, mask, "MGGA", with_lapl=False,
-        ) * 0.5
-        fref, kref_alpha, kref_beta = _mgga_fref_kref(mf, rho0)
-        rho = {
-            label: ni.eval_rho(
-                mol, ao, density, mask, "MGGA", hermi=0,
-                with_lapl=False,
-            )
-            for label, density in densities.items()
-        }
-        if pair_labels:
-            pair_values, contracted_pair_ao = pair_feature_batches(
-                ao, pair_density_stack,
-            )
-        else:
-            pair_values = ()
-            contracted_pair_ao = None
-        pairs = dict(zip(pair_labels, pair_values))
-        pair_potentials = {
-            label: mgga_pair_potential(fref, pairs[label])
-            for label in pair_labels
-        }
-        ordinary_weights = {
-            label: np.zeros((5, weights.size)) for label in densities
-        }
-        special_weights = {
-            label: np.zeros((4, 4, weights.size)) for label in pair_labels
-        }
-        reference_weights_alpha = np.zeros((5, weights.size))
-        reference_weights_beta = np.zeros_like(reference_weights_alpha)
-
-        for term in terms:
-            if term.vref0:
-                ordinary_weights[term.target] += term.vref0 * lib.einsum(
-                    "xyg,yg->xg", fref, rho[term.source],
-                )
-                ordinary_weights[term.source] += term.vref0 * lib.einsum(
-                    "xyg,xg->yg", fref, rho[term.target],
-                )
-                pair = term.vref0 * lib.einsum(
-                    "xg,yg->xyg", rho[term.target], rho[term.source],
-                )
-                reference_weights_alpha += lib.einsum(
-                    "xyg,xyzg->zg", pair, kref_alpha,
-                )
-                reference_weights_beta += lib.einsum(
-                    "xyg,xyzg->zg", pair, kref_beta,
-                )
-            if term.vref1:
-                special_weights[term.target] += (
-                    term.vref1 * pair_potentials[term.source]
-                )
-                special_weights[term.source] += (
-                    term.vref1 * pair_potentials[term.target]
-                )
-                pair = term.vref1 * mgga_pair_kernel_cross(
-                    pairs[term.target], pairs[term.source],
-                )
-                reference_weights_alpha += lib.einsum(
-                    "xyg,xyzg->zg", pair, kref_alpha,
-                )
-                reference_weights_beta += lib.einsum(
-                    "xyg,xyzg->zg", pair, kref_beta,
-                )
-        ordinary_weight_stack = np.asarray([
-            ordinary_weights[label] for label in density_labels
-        ])
-        special_weight_stack = np.asarray([
-            special_weights[label] for label in pair_labels
-        ])
-
-        for label in potentials:
-            add_mgga_matrix(
-                mol, potentials[label], ao,
-                ordinary_weights[label] * weights, mask, sparse,
-            )
-        for label in pair_labels:
-            potentials[label] += pair_matrix(
-                mol, ao, mask, special_weights[label] * weights, sparse,
-            )
-        reference_alpha += mgga_eval_matrix(
-            mol, ao, reference_weights_alpha * weights, mask,
-        )
-        reference_beta += mgga_eval_matrix(
-            mol, ao, reference_weights_beta * weights, mask,
-        )
-
-        if not with_direct:
-            continue
-        for k, atom in enumerate(atmlst):
-            p0, p1 = offsets[atom][2:]
-            for xyz in range(3):
-                drho, drho_alpha, drho_beta, ao_delta = (
-                    _response_density_derivatives(
-                        ao, density_stack, density_labels,
-                        p0, p1, xyz, "MGGA",
-                    )
-                )
-                drho_stack = np.asarray([
-                    drho[label] for label in density_labels
-                ])
-                value = lib.einsum(
-                    "nfg,nfg,g->",
-                    ordinary_weight_stack, drho_stack, weights,
-                )
-                value += lib.einsum(
-                    "fg,fg,g->",
-                    reference_weights_alpha, drho_alpha, weights,
-                )
-                value += lib.einsum(
-                    "fg,fg,g->",
-                    reference_weights_beta, drho_beta, weights,
-                )
-                if pair_labels:
-                    value += contract_pair_feature_derivatives(
-                        ao, pair_density_stack, ao_delta,
-                        contracted_pair_ao, p0, p1,
-                        special_weight_stack, weights,
-                    )
-                direct[k, xyz] += value
-
-    q_alpha, q_beta = _project_channel_potentials(
-        tdobj, potentials, blocks, target_spin=target_spin,
-    )
-    _add_reference_q(
-        tdobj, q_alpha, q_beta, reference_alpha, reference_beta,
-    )
-    return XCGradientTerms(q_alpha, q_beta, direct)
-
-
-def mgga_fockz_terms(
-        gradient_driver, tdobj, spaces, pz, atmlst=None,
-        with_direct=True):
-    """MGGA derivative of ``Pz:Fz`` excluding its explicit Pz projection."""
-    mf = tdobj._scf
-    mol = mf.mol
-    ni = mf._numint
-    if atmlst is None:
-        atmlst = range(mol.natm)
-    atmlst = tuple(atmlst)
-    density_open = spaces.c_open @ spaces.c_open.T
-    pz = 0.5 * (np.asarray(pz) + np.asarray(pz).T)
-    nao = mol.nao_nr()
-    open_potential = np.zeros((nao, nao))
-    reference_alpha = np.zeros((nao, nao))
-    reference_beta = np.zeros_like(reference_alpha)
-    direct = np.zeros((len(atmlst), 3))
-    mo = np.asarray(mf.mo_coeff)
-    density_alpha = mo[:, mf.mo_occ > 0] @ mo[:, mf.mo_occ > 0].T
-    density_beta = mo[:, mf.mo_occ == 2] @ mo[:, mf.mo_occ == 2].T
-    density_stack = np.asarray((
-        pz, density_open, density_alpha, density_beta,
-    ))
-    offsets = mol.offset_nr_by_atom()
-    sparse = sparse_context(mf)
-
-    for ao, mask, weights, _coords in ni.block_loop(
-            mol, mf.grids, nao, 2, max_memory=gradient_driver.max_memory):
-        rho0 = ni.eval_rho2(
-            mol, ao, mo, mf.mo_occ, mask, "MGGA", with_lapl=False,
-        ) * 0.5
-        fref, kref_alpha, kref_beta = _mgga_fref_kref(mf, rho0)
-        rho_pz = ni.eval_rho(
-            mol, ao, pz, mask, "MGGA", hermi=1, with_lapl=False,
-        )
-        rho_open = ni.eval_rho(
-            mol, ao, density_open, mask, "MGGA", hermi=1,
-            with_lapl=False,
-        )
-        add_mgga_matrix(
-            mol,
-            open_potential,
-            ao,
-            0.5 * lib.einsum("xyg,yg->xg", fref, rho_pz) * weights,
-            mask,
-            sparse,
-        )
-        pair = 0.5 * lib.einsum("xg,yg->xyg", rho_pz, rho_open)
-        reference_alpha += mgga_eval_matrix(
-            mol, ao, lib.einsum("xyg,xyzg->zg", pair, kref_alpha) * weights,
-            mask,
-        )
-        reference_beta += mgga_eval_matrix(
-            mol, ao, lib.einsum("xyg,xyzg->zg", pair, kref_beta) * weights,
-            mask,
-        )
-        if not with_direct:
-            continue
-        for k, atom in enumerate(atmlst):
-            p0, p1 = offsets[atom][2:]
-            derivative_batches = _hermitian_density_derivative_batches(
-                ao, density_stack, p0, p1, "MGGA",
-            )
-            for xyz, derivatives in enumerate(derivative_batches):
-                drho_pz, drho_open, drho_alpha, drho_beta = derivatives
-                direct[k, xyz] += 0.5 * lib.einsum(
-                    "xg,xyg,yg,g->", drho_pz, fref, rho_open, weights,
-                )
-                direct[k, xyz] += 0.5 * lib.einsum(
-                    "xg,xyg,yg,g->", rho_pz, fref, drho_open, weights,
-                )
-                direct[k, xyz] += lib.einsum(
-                    "xyg,xyzg,zg,g->",
-                    pair, kref_alpha, drho_alpha, weights,
-                )
-                direct[k, xyz] += lib.einsum(
-                    "xyg,xyzg,zg,g->",
-                    pair, kref_beta, drho_beta, weights,
-                )
-
-    q_alpha = np.zeros((mo.shape[1], mo.shape[1]))
-    q_beta = np.zeros_like(q_alpha)
-    q_alpha[:, spaces.open] += (
-        mo.conj().T @ (open_potential + open_potential.T) @ spaces.c_open
-    )
-    _add_reference_q(
-        tdobj, q_alpha, q_beta, reference_alpha, reference_beta,
-    )
-    return XCGradientTerms(q_alpha, q_beta, direct)
-
-
-def mgga_nobeta_reference_q(tdobj, p0, max_memory=None):
-    """Reference-density response of the MGGA equal-spin common Fock."""
-    mf = tdobj._scf
-    mo = np.asarray(mf.mo_coeff)
-    q_alpha = np.zeros((mo.shape[1], mo.shape[1]))
-    q_beta = np.zeros_like(q_alpha)
-    if not tdobj.nobeta:
-        return q_alpha, q_beta
-    if max_memory is None:
-        max_memory = tdobj.max_memory
-    ni = mf._numint
-    mol = mf.mol
-    density_alpha = mo[:, mf.mo_occ > 0] @ mo[:, mf.mo_occ > 0].T
-    density_beta = mo[:, mf.mo_occ == 2] @ mo[:, mf.mo_occ == 2].T
-    density0 = 0.5 * (density_alpha + density_beta)
-    p0 = 0.5 * (np.asarray(p0) + np.asarray(p0).T)
-    matrix_alpha = np.zeros((mol.nao_nr(), mol.nao_nr()))
-    matrix_beta = np.zeros_like(matrix_alpha)
-    for ao, mask, weights, _coords in ni.block_loop(
-            mol, mf.grids, mol.nao_nr(), 2, max_memory=max_memory):
-        rho_p = ni.eval_rho(
-            mol, ao, p0, mask, "MGGA", hermi=1, with_lapl=False,
-        )
-        rho_alpha = ni.eval_rho(
-            mol, ao, density_alpha, mask, "MGGA", hermi=1,
-            with_lapl=False,
-        )
-        rho_beta = ni.eval_rho(
-            mol, ao, density_beta, mask, "MGGA", hermi=1,
-            with_lapl=False,
-        )
-        rho_equal = ni.eval_rho(
-            mol, ao, density0, mask, "MGGA", hermi=1, with_lapl=False,
-        )
-        fxc_actual = ni.eval_xc_eff(
-            mf.xc, (rho_alpha, rho_beta), deriv=2,
-            xctype="MGGA", spin=1,
-        )[2]
-        fxc_equal = ni.eval_xc_eff(
-            mf.xc, (rho_equal, rho_equal), deriv=2,
-            xctype="MGGA", spin=1,
-        )[2]
-        equal = 0.25 * (
-            fxc_equal[0, :, 0] + fxc_equal[0, :, 1]
-            + fxc_equal[1, :, 0] + fxc_equal[1, :, 1]
-        )
-        actual_alpha = 0.5 * (
-            fxc_actual[0, :, 0] + fxc_actual[1, :, 0]
-        )
-        actual_beta = 0.5 * (
-            fxc_actual[0, :, 1] + fxc_actual[1, :, 1]
-        )
-        matrix_alpha += mgga_eval_matrix(
-            mol,
-            ao,
-            lib.einsum("xg,xzg->zg", rho_p, equal - actual_alpha) * weights,
-            mask,
-        )
-        matrix_beta += mgga_eval_matrix(
+        matrix_beta += eval_matrix(
             mol,
             ao,
             lib.einsum("xg,xzg->zg", rho_p, equal - actual_beta) * weights,

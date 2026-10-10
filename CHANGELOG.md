@@ -1,3 +1,21 @@
+## Unreleased
+
+### Added
+
+- NTTDA analytic gradients for `deltaS=+1` on ROKS and AOCSCF references,
+  including HF, LDA/GGA/MGGA, hybrid and range-separated functionals, and
+  `nobeta`. The derivation and independent algebra check accompany the code.
+
+### Fixed
+
+- NTTDA analytic gradients handle references with no independent orbital
+  rotations and inherit the TD object's memory limit.
+
+### Changed
+
+- NTTDA gradient assembly uses explicit J/K contractions and a shared amplitude
+  layout. The public gradient and scanner conventions remain unchanged.
+
 ## v0.1.0 (2026-07-10)
 
 ### Added

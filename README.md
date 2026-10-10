@@ -11,19 +11,20 @@ It is built on top of the PySCF electronic structure package.
                                  PySCF
                                    │
                                    ▼
-                        MCfun (Multicollinear Approach)
+                                 NEST
+                    (Multicollinear Framework)
                                    │
         ┌──────────────────────────┼──────────────────────────┐
         │                          │                          │
         ▼                          ▼                          ▼
-GKS (Noncollinear DFT)            UKS                        ROKS
+       GKS                        UKS                        ROKS
         │                          │                          │
         ▼                          ▼                          ▼
-Noncollinear TDDFT            SF-TDDFT                     NT-TDA
-                               ├── Gradients               ├── Analytic gradients
-                               ├── NADC                    └── SOC (under development)
-                               ├── Oscillator strengths
-                               └── SOC (under development)
+Noncollinear TDDFT         Noncollinear SF-TDDFT      Noncollinear Tensor TDA
+                                   ├── Gradients            ├── Gradients
+                                   ├── Oscillator strengths ├── Oscillator strengths
+                                   ├── NADC                 ├── NADC (in progress)
+                                   └── SOC                  └── SOC
 ```
 
 ## Features
@@ -41,16 +42,27 @@ Noncollinear TDDFT            SF-TDDFT                     NT-TDA
   Within the noncollinear TDDFT formalism, SF-TDDFT and conventional spin-conserving TDDFT naturally emerge as two decoupled sectors for collinear reference states.
    
   - Analytic gradients
-  - Analytic nonadiabatic derivative couplings (NADC)
   - Oscillator strengths
-  - Spin-orbit coupling (SOC) *(under development)*
+  - Analytic nonadiabatic derivative couplings (NADC)
+  - Spin–orbit coupling (SOC)
 
 - Noncollinear Tensor TDA (NT-TDA)
 
   NT-TDA is a spin-consistent extension of noncollinear TDDFT that provides a unified treatment of spin-conserving and spin-flip excitations. For an open-shell reference state with total spin S, it can describe target states with total spins S−1 (except for S = 1/2), S, and S+1. All resulting states are free from spin contamination.
 
-  - Analytic gradients for the $\Delta S=-1$, $\Delta S=0$, and $\Delta S=+1$ channels
-  - Spin-orbit coupling (SOC) *(under development)*
+  - Analytic gradients for ΔS = −1, 0, and +1 on ROKS and average-occupation ROKS (AOCSCF) references
+  - Finite-difference gradients for all three spin channels
+  - Oscillator strengths
+  - NADC *(in progress)*
+  - SOC
+
+  `td.Gradients().kernel(state=n)` returns the gradient of the selected total
+  energy (`state=1` is the lowest NTTDA root; `state=0` is the reference).
+  `td.Gradients().as_scanner(state=n)` provides the energy and gradient for geometry optimization.
+  Analytic DFT gradients omit numerical grid response; finite-difference checks
+  use fixed grids by default. Density fitting, X2C, solvent response, and NLC
+  are not supported by the NTTDA gradient driver.
+  See the [AOCSCF gradient example](examples/nttda/02_nttda_aocscf_grad.py).
 
 
 ## Authors
@@ -120,6 +132,43 @@ nt = roks.NTTDA()
 
 See [`examples`](examples) for complete calculations.
 
+## Developing NTTDA gradients
+
+Start with [`grad/nttda/driver.py`](src/nest/grad/nttda/driver.py), which assembles
+the excitation gradient in order: MO derivatives, the Z-vector solve, batched
+J/K contractions, and overlap response. The total gradient adds the reference
+gradient in [`grad/nttda/__init__.py`](src/nest/grad/nttda/__init__.py).
+
+- The three `delta_s_*.py` modules contain channel-specific amplitude
+  blocks and Fock/response coefficients. Amplitude layouts are shared with the
+  energy module's `_split_amplitudes` helper.
+- `common.py` contains orbital partitions, projections, reference densities,
+  and J/K contraction helpers. Its term records hold data; contraction is explicit.
+- `roks.py` and `ensemble.py` implement the reference-specific orbital response.
+- `xc.py` contains fixed-grid XC quadrature and returns MO and nuclear derivatives.
+
+The [ΔS = +1 derivation](docs/derivations/nttda_delta_s_plus_one_gradient.md)
+connects the production energy action to the particle/hole projections, XC
+kernel derivatives, Z-vector equation, and overlap response. Its independent
+algebra check is in [`tools/symbolic`](tools/symbolic/README.md).
+
+For compatibility, the NTTDA driver's `grad_nuc()` still returns the **full
+reference gradient**, and `grad_elec()` returns the **excitation-energy gradient**.
+Their implementations are named `_reference_gradient` and `_excitation_gradient`
+to make this decomposition explicit. `kernel()` and the scanner retain their
+total-energy convention.
+
+Run the gradient regressions with:
+
+```bash
+PYTHONPATH=src OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+  python -m pytest src/nest/grad/tests/test_nttda*.py -q
+```
+
+These cover scalar closure, orbital and nuclear finite differences, both
+reference types, and J/K batching. The strict scalar-closure tests temporarily
+use one OpenMP thread to avoid reduction-order noise, without changing tolerances.
+
 ## License
 
 NEST is released under the Apache License 2.0.
@@ -130,22 +179,22 @@ If you use NEST in your research, please cite the relevant publication(s) listed
 
 ### Noncollinear DFT
 
-- Multicollinear approach (PRR, 2023)
-- Matrix representation (WIREs, 2026)
-- Nonlocal functionals (JCP, 2025)
+- Multicollinear approach (PRR, 2023) https://doi.org/10.1103/PhysRevResearch.5.013036
+- Matrix representation (WIREs, 2026) https://doi.org/10.1002/wcms.70063
+- Nonlocal functionals (JCP, 2025) https://doi.org/10.1063/5.0260762
 
 ### Noncollinear TDDFT
 
-- Noncollinear TDDFT and noncollinear SF-TDDFT (JCTC, 2023)
-- Real-time noncollinear TDDFT (JCTC, 2024)
+- Noncollinear TDDFT and noncollinear SF-TDDFT (JCTC, 2023) https://doi.org/10.1021/acs.jctc.3c00059
+- Real-time noncollinear TDDFT (JCTC, 2024) https://doi.org/10.1021/acs.jctc.4c01218
 
 ### Noncollinear SF-TDDFT
 
-- Analytic gradients (JCTC, 2025)
-- Zero-excitation-energy theorem (JCTC, 2025)
-- Conical intersections and spin crossings (JCTC, 2025)
-- Analytic nonadiabatic derivative couplings (JCTC, 2026)
+- Analytic gradients (JCTC, 2025) https://doi.org/10.1021/acs.jctc.5c00115
+- Zero-excitation-energy theorem (JCTC, 2025) https://doi.org/10.1021/acs.jctc.5c00714
+- Conical intersections and spin crossings (JCTC, 2025) https://doi.org/10.1021/acs.jctc.5c01272
+- Analytic nonadiabatic derivative couplings (JCTC, 2026) https://doi.org/10.1021/acs.jctc.6c00556
 
 ### Noncollinear Tensor TDA (NT-TDA)
 
-- Manuscript in preparation.
+- NT-TDA (JCTC, 2026) https://doi.org/10.1021/acs.jctc.6c01470
