@@ -209,15 +209,21 @@ class AOCSCFFiniteDifferenceGradient(unittest.TestCase):
                 mf.grids.level = 0
                 mf.kernel()
                 self.assertTrue(mf.converged)
+                # Resolve the complete small raising space: with only two roots,
+                # displaced Davidson residuals can stall near the 1e-9 tolerance.
+                nstates = 2
+                if delta_s == 1:
+                    nstates = np.count_nonzero(mf.mo_occ == 2) * np.count_nonzero(mf.mo_occ == 0)
                 tdobj = NTTDA(mf).set(
                     deltaS=delta_s,
                     nobeta=nobeta,
-                    nstates=2,
+                    nstates=nstates,
                     conv_tol=1e-9,
                     lindep=1e-20,
                     max_cycle=200,
                     verbose=0,
                 ).run()
+                self.assertTrue(np.all(tdobj.converged))
                 gradient = tdobj.Gradients().set(
                     verbose=0,
                     fixed_grid=True,

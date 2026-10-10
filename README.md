@@ -201,7 +201,7 @@ Run the NAC regressions with:
 
 ```bash
 PYTHONPATH=src OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-  python -m pytest src/nest/nac/tests/test_nttda.py -q
+  python -m pytest src/nest/nac/tests/test_nttda_nac.py -q
 ```
 
 These compare analytic couplings with independent cross-geometry wavefunction

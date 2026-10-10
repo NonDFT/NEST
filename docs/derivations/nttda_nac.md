@@ -216,12 +216,12 @@ $$
 
 **代码对应：** `src/nest/nac/nttda.py`（解析组装），
 `src/nest/nac/_nttda_overlap.py`（独立自旋适配重叠），
-`src/nest/nac/tests/test_nttda.py`（代数、相位及核位移回归）。
+`src/nest/nac/tests/test_nttda_nac.py`（代数、相位及核位移回归）。
 测试中的小行列式检验承担符号验证，不再另建一份重复的符号脚本。
 
 ### 本地验收 — 2026-10-10
 
-在单线程 `nest-dev` 环境下，运行 `src/nest/nac/tests/test_nttda.py` 和
+在单线程 `nest-dev` 环境下，运行 `src/nest/nac/tests/test_nttda_nac.py` 和
 `src/nest/grad/tests/test_nttda*.py`：**72 项测试及 175 个子测试全部通过**，
 其中 48 项为新增 NAC 检查。修改涉及的 Python 文件通过 Ruff 检查。
 

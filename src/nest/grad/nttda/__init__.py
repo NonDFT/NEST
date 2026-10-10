@@ -168,13 +168,11 @@ class Gradients(rhf_grad.GradientsBase):
 
     def _reference_gradient(self, atmlst=None):
         """Ground-state reference gradient, including nuclear repulsion."""
-        if atmlst is not None:
-            atmlst = list(atmlst)
         reference_gradient = self.base._scf.nuc_grad_method()
-        if self.mol.symmetry:
-            de = reference_gradient.kernel()
-            return de if atmlst is None else de[atmlst]
-        return reference_gradient.kernel(atmlst=atmlst)
+        # Select atoms after the full calculation to preserve symmetry and avoid
+        # the atom-subset indexing regression in PySCF 2.14.0 UHF/ROKS gradients.
+        de = reference_gradient.kernel()
+        return de if atmlst is None else de[list(atmlst)]
 
     # Preserve the historical NTTDA API: grad_nuc includes the electronic
     # reference gradient, while grad_elec below means d(omega)/dR.

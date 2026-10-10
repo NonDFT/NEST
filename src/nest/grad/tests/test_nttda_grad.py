@@ -170,6 +170,27 @@ class NTTDAGradientAcceptance(unittest.TestCase):
                     analytic, finite_difference, atol=1e-6, rtol=0,
                 )
 
+    def test_reference_gradient_atom_selection(self):
+        mol = gto.M(
+            atom="Li 0 0 0; H 0 0 1.60", basis="sto-3g",
+            spin=0, unit="Bohr", verbose=0,
+        )
+        for xc in ("HF", "PBE"):
+            mf = dft.ROKS(mol).set(
+                xc=xc, conv_tol=1e-13, conv_tol_grad=1e-10,
+                max_cycle=200, verbose=0,
+            )
+            mf.grids.level = 0
+            mf.kernel()
+            self.assertTrue(mf.converged)
+            gradient = NTTDA(mf).Gradients()
+            full = gradient.kernel(state=0)
+            for atoms in ([0], [1], [1, 0], [0, 0], []):
+                with self.subTest(xc=xc, atoms=atoms):
+                    selected = gradient.kernel(state=0, atmlst=atoms)
+                    self.assertEqual(selected.shape, (len(atoms), 3))
+                    np.testing.assert_allclose(selected, full[atoms], atol=1e-12, rtol=0)
+
     def test_gradient_inherits_td_memory_limit(self):
         mf = dft.ROKS(self.molecule()).set(max_memory=128)
         tdobj = NTTDA(mf).set(max_memory=64)
