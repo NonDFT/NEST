@@ -133,7 +133,13 @@ def _preconditioner(tdobj, pairs):
 
 
 def _solve_zvector(action, diagonal, rhs, tolerance=1e-12, max_cycle=None):
-    """Shared preconditioned Krylov solve, with a reference-specific diagonal."""
+    """Preconditioned Krylov solve with a check of the actual equation.
+
+    Krylov's trial-vector linear-dependence cutoff can terminate before
+    the residual converges, especially after rotations within C/O/V spaces.
+    Up to two scaled residual corrections recover the requested accuracy;
+    ``max_cycle`` bounds each Krylov solve.
+    """
     if rhs.size == 0:
         return np.empty_like(rhs)
     initial = rhs / diagonal
@@ -146,16 +152,30 @@ def _solve_zvector(action, diagonal, rhs, tolerance=1e-12, max_cycle=None):
             return action(vector) / diagonal - vector
         return np.asarray([action(row) / diagonal - row for row in vector])
 
-    solution = lib.krylov(
-        operator,
-        initial,
-        tol=tolerance,
-        max_cycle=max_cycle,
-        lindep=1e-22,
-        hermi=False,
-        verbose=0,
-    )
-    return np.asarray(solution).reshape(-1)
+    def solve(preconditioned_rhs):
+        return np.asarray(lib.krylov(
+            operator,
+            preconditioned_rhs,
+            tol=tolerance,
+            max_cycle=max_cycle,
+            lindep=1e-22,
+            hermi=False,
+            verbose=0,
+        )).reshape(-1)
+
+    solution = solve(initial)
+    # Respect the requested residual up to an absolute roundoff floor.
+    threshold = max(tolerance, 1e-12)
+    for correction in range(3):
+        residual = rhs - action(solution)
+        error = np.max(np.abs(residual), initial=0.0)
+        if np.isfinite(error) and error <= threshold:
+            return solution
+        if not np.isfinite(error) or correction == 2:
+            raise RuntimeError('NTTDA orbital response did not converge (residual %.3e)' % error)
+        preconditioned = residual / diagonal
+        scale = np.linalg.norm(preconditioned)
+        solution += scale * solve(preconditioned / scale)
 
 def solve_zvector(action, pairs, tdobj, rhs, tolerance=1e-12, max_cycle=None):
     """Solve the ROKS adjoint with its spin-resolved preconditioner."""
