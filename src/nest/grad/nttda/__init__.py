@@ -131,6 +131,7 @@ class Gradients(rhf_grad.GradientsBase):
 
     def __init__(self, tdobj):
         super().__init__(tdobj)
+        self.max_memory = tdobj.max_memory
         self.state = 1
         self.method = "analytic"
         self.step = 1e-3

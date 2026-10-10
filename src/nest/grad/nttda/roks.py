@@ -59,7 +59,7 @@ def finish_gradient(
         max_cycle=max_cycle,
     )
     adjoint = response.zvector_adjoint_matrix(tdobj, pairs, zvector)
-    residual = float(np.max(np.abs(pack_m_matrix(adjoint, pairs) - rhs)))
+    residual = float(np.max(np.abs(pack_m_matrix(adjoint, pairs) - rhs), initial=0.0))
     probe_alpha, probe_beta = response.zvector_probe_densities(
         tdobj, pairs, zvector,
     )
@@ -215,6 +215,8 @@ def _preconditioner(tdobj, pairs):
 
 def _solve_zvector(action, diagonal, rhs, tolerance=1e-12, max_cycle=None):
     """Shared preconditioned Krylov solve, with a reference-specific diagonal."""
+    if rhs.size == 0:
+        return np.empty_like(rhs)
     initial = rhs / diagonal
     if max_cycle is None:
         max_cycle = len(rhs)

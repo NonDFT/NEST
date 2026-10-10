@@ -113,6 +113,31 @@ class NTTDAGradientAcceptance(unittest.TestCase):
         )
         self.assertTrue(np.all(np.isfinite(finite_difference)))
 
+    def test_gradient_inherits_td_memory_limit(self):
+        mf = dft.ROKS(self.molecule()).set(max_memory=128)
+        tdobj = NTTDA(mf).set(max_memory=64)
+        self.assertEqual(tdobj.Gradients().max_memory, 64)
+
+    def test_gradient_without_independent_orbital_rotations(self):
+        mol = gto.M(
+            atom="H 0 0 0; H 0 0 1.4", basis="sto-3g",
+            spin=2, unit="Bohr", verbose=0,
+        )
+        mf = mol.ROKS(xc="HF").run(conv_tol=1e-12)
+        # Both orbitals are open: there are no CO, CV or OV rotations.
+        np.testing.assert_array_equal(mf.mo_occ, [1, 1])
+        tdobj = NTTDA(mf).set(
+            deltaS=-1, nstates=2, conv_tol=1e-9, verbose=0,
+        ).run()
+        gradient = tdobj.Gradients()
+        analytic = gradient.kernel(state=1)
+        self.assertEqual(gradient.nttda_details.zvector.size, 0)
+        self.assertEqual(gradient.nttda_details.residual, 0)
+        finite_difference = gradient.kernel(
+            state=1, method="finite_diff", step=2e-4,
+        )
+        np.testing.assert_allclose(analytic, finite_difference, atol=1e-7, rtol=0)
+
 
 if __name__ == "__main__":
     unittest.main()
