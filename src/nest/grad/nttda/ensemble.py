@@ -20,33 +20,27 @@ from pyscf import dft, lib
 from pyscf.scf import hf
 
 from .roks import finish_gradient, pack_m_matrix, _solve_zvector
+from .roks import _same_occupation_pairs
 
 
 def canonical_pairs(tdobj):
-    """Independent rotations between unequal-occupation orbital spaces."""
+    """SCF rotations and canonical rotations across frozen boundaries."""
     occupation = np.asarray(tdobj._scf.mo_occ)
     labels = {2: "c", 1: "o", 0: "v"}
     rows, columns = np.where(hf.uniq_var_indices(occupation))
-    return tuple(
+    return _same_occupation_pairs(tdobj) + tuple(
         (int(p), int(q), labels[int(occupation[q])] + labels[int(occupation[p])])
         for p, q in zip(rows, columns)
     )
-
-
-def _rotation_matrix(vector, pairs, nmo):
-    rotation = np.zeros((nmo, nmo))
-    for value, (p, q, _name) in zip(vector, pairs):
-        rotation[p, q] += value
-        rotation[q, p] -= value
-    return rotation
 
 
 def _weighted_source(tdobj, pairs, vector):
     occupation = np.asarray(tdobj._scf.mo_occ)
     nmo = occupation.size
     source = np.zeros((nmo, nmo))
-    for value, (p, q, _name) in zip(vector, pairs):
-        source[p, q] += value * (occupation[q] - occupation[p])
+    for value, (p, q, name) in zip(vector, pairs):
+        weight = 1.0 if name in ("cc", "vv") else occupation[q] - occupation[p]
+        source[p, q] += value * weight
     return source
 
 
@@ -56,30 +50,24 @@ def _fock_mo(mf):
 
 
 def make_hessian_transpose_action(tdobj, pairs=None):
-    """Return the symmetric average-occupation orbital Hessian action."""
+    """Return the transpose of the SCF and canonical-constraint Jacobian."""
     mf = tdobj._scf
     orbitals = np.asarray(mf.mo_coeff)
     occupation = np.asarray(mf.mo_occ)
-    occupation_difference = occupation[None, :] - occupation[:, None]
-    nmo = orbitals.shape[1]
     if pairs is None:
         pairs = canonical_pairs(tdobj)
     fock = _fock_mo(mf)
     response = lib.view(mf, dft.rks.RKS).gen_response(hermi=1)
 
     def apply_one(vector):
-        rotation = _rotation_matrix(vector, pairs, nmo)
-        density_mo = rotation * occupation_difference
-        density_ao = orbitals @ density_mo @ orbitals.conj().T
-        potential = response(density_ao)
-        potential_mo = orbitals.conj().T @ potential @ orbitals
-        fock_derivative = (
-            fock @ rotation - rotation @ fock + potential_mo
-        )
-        return np.asarray([
-            occupation_difference[p, q] * fock_derivative[p, q]
-            for p, q, _name in pairs
-        ])
+        # The transpose must be explicit: canonical same-occupation
+        # constraints make the augmented SCF Jacobian asymmetric.
+        source = _weighted_source(tdobj, pairs, vector)
+        density_ao = orbitals @ (0.5 * (source + source.T)) @ orbitals.conj().T
+        potential_mo = orbitals.conj().T @ response(density_ao) @ orbitals
+        gradient = fock @ (source + source.T)
+        gradient += (potential_mo + potential_mo.T) * occupation[None, :]
+        return pack_m_matrix(gradient, pairs)
 
     def apply(vector):
         vector = np.asarray(vector)
@@ -120,8 +108,8 @@ def _preconditioner(tdobj, pairs):
     occupation = np.asarray(tdobj._scf.mo_occ)
     epsilon = np.diag(_fock_mo(tdobj._scf))
     diagonal = np.asarray([
-        (occupation[q] - occupation[p]) * (epsilon[p] - epsilon[q])
-        for p, q, _name in pairs
+        (1.0 if name in ("cc", "vv") else occupation[q] - occupation[p]) * (epsilon[p] - epsilon[q])
+        for p, q, name in pairs
     ])
     small = np.abs(diagonal) < 1e-8
     diagonal[small] = np.where(diagonal[small] < 0.0, -1e-8, 1e-8)
