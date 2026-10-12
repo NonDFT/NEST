@@ -64,6 +64,30 @@ Noncollinear TDDFT         Noncollinear SF-TDDFT      Noncollinear Tensor TDA
   are not supported by the NTTDA gradient driver.
   See the [AOCSCF gradient example](examples/nttda/02_nttda_aocscf_grad.py).
 
+  For transitions from an independently optimized closed-shell RKS ground
+  state to singlets built on a core-excited triplet ROKS reference:
+
+  ```python
+  from nest.nttda.rks import transition_properties
+
+  properties = transition_properties(td, ground, state=[6, 7, 8])
+  print(properties['overlap'])
+  print(properties['dipole'])
+  print(properties['oscillator_strength'])
+  ```
+
+  This interface handles different real MO sets at the same geometry and AO
+  basis, for `deltaS=-1` and a two-SOMO reference. Energies are
+  `E_ROKS + omega - E_RKS`. The returned total dipole includes the nuclear
+  overlap term and uses the same positive electronic-position sign as the
+  existing NTTDA interface (the negative of the physical electric dipole).
+  Neutral-system results are origin invariant; charged systems with nonzero
+  overlap issue a warning. The states are not orthogonalized, and the usual
+  oscillator-strength formula is applied to these approximate states.
+  X2C is not supported by this interface. See the commented
+  [C1 CH4 example](examples/deltascf/05_rks_transition.py), including a
+  comparison with the existing NTTDA-root transition dipoles.
+
 
 ## Authors
 
