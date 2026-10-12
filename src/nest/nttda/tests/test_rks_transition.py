@@ -177,6 +177,26 @@ class RksTransitionTests(unittest.TestCase):
             if charge == 0:
                 np.testing.assert_allclose(moved['oscillator_strength'], original['oscillator_strength'], atol=2e-14)
 
+    def test_frozen_orbitals_retain_reference_electrons(self):
+        ground, full = make_problem()
+        frozen = NTTDA(full._scf, frozen=[1, 3])  # All closed and virtual MOs in this small example.
+        frozen.deltaS = -1
+        frozen.e = full.e.copy()
+        # Keep the OO block, orthonormalize its physical singlet vectors,
+        # and embed them in the full space as an independent comparison.
+        oo = np.array([x[1:, :2].ravel() for x, _ in full.xy])
+        oo = np.linalg.qr(oo.T)[0].T.reshape(3, 2, 2)
+        frozen.xy = [(x, 0) for x in oo]
+        full.xy = []
+        for x in oo:
+            padded = np.zeros((3, 3))
+            padded[1:, :2] = x
+            full.xy.append((padded, 0))
+        expected = rks.transition_properties(full, ground)
+        actual = rks.transition_properties(frozen, ground)
+        for key in expected:
+            np.testing.assert_allclose(actual[key], expected[key], atol=2e-14, rtol=0)
+
     def test_unsupported_inputs(self):
         ground, td = make_problem()
         for state in (0, 4, 1.5):

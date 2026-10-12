@@ -62,6 +62,10 @@ assert reference.freeze_converged and reference.converged
 # With SGM instead, pass excited.undo_sgm() to NTTDA.
 
 td = reference.NTTDA()
+# To omit excitations out of all doubly occupied orbitals instead:
+# td = reference.NTTDA(frozen=np.flatnonzero(reference.mo_occ == 2).tolist())
+# Frozen occupied orbitals still contribute to overlap and dipole integrals.
+# SOMOs must remain active: this does not strictly enforce a core hole.
 td.chkfile = None
 td.deltaS = -1
 td.nstates = 30  # Includes several roots that refill the core hole.

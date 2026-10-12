@@ -88,6 +88,11 @@ Noncollinear TDDFT         Noncollinear SF-TDDFT      Noncollinear Tensor TDA
   [C1 CH4 example](examples/deltascf/05_rks_transition.py), including a
   comparison with the existing NTTDA-root transition dipoles.
 
+  `td.frozen` also applies to this interface. Frozen closed orbitals stay
+  doubly occupied in every determinant; only the excitation space is reduced.
+  The core SOMO cannot be frozen, so freezing other occupied orbitals does
+  not enforce a fixed core hole.
+
 
 ## Authors
 

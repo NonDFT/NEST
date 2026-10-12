@@ -73,11 +73,14 @@ def _tensor(state, b, j, component, nmo):
                        (-1 / np.sqrt(2), _apply_e(state, b + nmo, j + nmo)))
 
 
-def _singlet_csfs(cs, os, vs, nmo):
+def _singlet_csfs(cs, os, vs, nmo, reference_cs=None):
     """Yield S=1 -> S=0 CSFs in stored [source(C,O), target(O,V)] order."""
     # Python ints (not numpy int64) are needed for arbitrarily many orbitals.
     cs, os, vs = list(map(int, cs)), list(map(int, os)), list(map(int, vs))
-    ref_det = sum(1 << p for p in cs + os) + sum(1 << (p + nmo) for p in cs)
+    reference_cs = cs if reference_cs is None else list(map(int, reference_cs))
+    # Frozen closed orbitals remain doubly occupied in every determinant;
+    # only the excitation labels below use the active C/O/V spaces.
+    ref_det = sum(1 << p for p in reference_cs + os) + sum(1 << (p + nmo) for p in reference_cs)
     ref = {ref_det: 1.0}
     lowered = _add_states(*[(1, _tensor(ref, w, w, -1, nmo)) for w in os])
     double_flip = _tensor(_tensor(ref, os[0], os[0], -1, nmo), os[1], os[1], -1, nmo)
@@ -186,6 +189,8 @@ def transition_properties(tdobj, ground, state=None, origin=None):
 
     Args:
         tdobj: Computed deltaS=-1 NTTDA on a two-SOMO triplet ROKS reference.
+            Frozen closed/virtual orbitals are supported; frozen closed
+            orbitals remain occupied in the determinant matrix elements.
         ground: Converged closed-shell RKS at the same geometry and in the
             same AO basis/order. Its MOs may differ from the ROKS MOs.
         state: 1-based computed root or sequence of roots; None selects all.
@@ -218,9 +223,10 @@ def transition_properties(tdobj, ground, state=None, origin=None):
             or not np.all(np.isin(ground_occ, [0, 2])) or not np.all(np.isin(ref_occ, [0, 1, 2]))):
         raise ValueError('Real restricted RKS/ROKS orbitals with integer occupations are required')
     cs, os, vs = _orbital_indices(tdobj)
+    reference_cs = np.flatnonzero(ref_occ == 2)
     if tdobj.deltaS != -1 or len(os) != 2 or mol.spin != 2 or ground.mol.spin != 0:
         raise ValueError('Requires a closed-shell ground state and deltaS=-1 NTTDA on a triplet ROKS reference')
-    if (ground.mol.nelectron != mol.nelectron or np.count_nonzero(ground_occ == 2) != len(cs) + 1):
+    if (ground.mol.nelectron != mol.nelectron or np.count_nonzero(ground_occ == 2) != len(reference_cs) + 1):
         raise ValueError('RKS and NTTDA must have the same number of electrons')
     if (ground.mol.natm != mol.natm or ground.mol.cart != mol.cart
             or [ground.mol.atom_symbol(i) for i in range(mol.natm)] != [mol.atom_symbol(i) for i in range(mol.natm)]
@@ -246,7 +252,7 @@ def transition_properties(tdobj, ground, state=None, origin=None):
         dip_ao = mol.intor_symmetric('int1e_r', comp=3)
     cross_r = np.einsum('up,xuv,vq->xpq', cg, dip_ao, ct, optimize=True)
 
-    basis = list(_singlet_csfs(cs, os, vs, ct.shape[1]))
+    basis = list(_singlet_csfs(cs, os, vs, ct.shape[1], reference_cs))
     determinants = set().union(*basis)
     occupations = {}
     for det in determinants:
@@ -256,7 +262,7 @@ def transition_properties(tdobj, ground, state=None, origin=None):
     spin_occupations = {occupied for spins in occupations.values() for occupied in spins}
     # Either SOMO can define the auxiliary closed shell. Choose the better
     # conditioned overlap, without assuming that a particular SOMO is core.
-    candidates = [sorted([*cs, orbital]) for orbital in os]
+    candidates = [sorted([*reference_cs, orbital]) for orbital in os]
     filled = max(candidates, key=lambda occupied: np.linalg.svd(cross_s[:, occupied], compute_uv=False)[-1])
     elements = _spin_elements(cross_s, cross_r, spin_occupations, filled)
     basis_overlap = np.zeros(len(basis))
