@@ -64,6 +64,22 @@ Noncollinear TDDFT         Noncollinear SF-TDDFT      Noncollinear Tensor TDA
   are not supported by the NTTDA gradient driver.
   See the [AOCSCF gradient example](examples/nttda/02_nttda_aocscf_grad.py).
 
+- Average-occupation SCF (AOCSCF)
+
+  `mol.ROKS(xc=...).average_occ()` optimizes spin-averaged orbitals and reports
+  the high-spin energy in `e_tot`; `e_avg_occ` stores the optimized
+  average-occupation energy. Both ordinary and symmetry-adapted references
+  support `.newton()` with the average-occupation response and shared-orbital Hessian.
+  Newton accepts the usual default SCF guess or explicit orbitals and occupations.
+
+  Import `nest.deltascf.fr` or `nest.deltascf.sgm` to use
+  `mf.FR().run(mo_coeff, mo_occ)` or `mf.SGM().run(mo_coeff, mo_occ)`.
+  FR requires a triplet with exactly two singly occupied orbitals and supports
+  Abelian point groups. SGM keeps the supplied occupations fixed. Newton and
+  SGM omit NLC response in the orbital Hessian.
+  See the [Newton + NTTDA example](examples/aocscf/03_soscf_nttda.py) and
+  [delta-SCF + NTTDA example](examples/aocscf/04_deltascf_nttda.py).
+
 
 ## Authors
 

@@ -83,6 +83,36 @@ class KnownValues(unittest.TestCase):
         self.assertTrue(reference.converged)
         self.assertAlmostEqual(e_tot, reference.e_tot, places=7)
 
+    def test_hcho_rydberg_triplet_aocscf(self):
+        # Same target state as test_hcho_rydberg_triplet, with average-occupation orbitals.
+        atom = '''
+        C  0.00000000  0.00000000 -1.13947666
+        O  0.00000000  0.00000000  1.14402883
+        H  0.00000000  1.76627623 -2.23398653
+        H  0.00000000 -1.76627623 -2.23398653
+        '''
+        mol = gto.M(atom=atom, basis='cc-pvdz', spin=0, verbose=0)
+        ground = mol.RKS(xc='BHandHLYP')
+        ground.grids.atom_grid = (75, 302)
+        ground.kernel()
+        occupations = ground.mo_occ.copy()
+        occupations[7] = 1
+        occupations[14] = 1
+
+        triplet = mol.copy()
+        triplet.spin = 2
+        mf = triplet.ROKS(xc='BHandHLYP').average_occ()
+        mf.grids.atom_grid = (75, 302)
+        opt = mf.FR()
+        opt.conv_tol = 1e-10
+        opt.conv_tol_grad = 1e-6
+        opt.kernel(ground.mo_coeff, occupations)
+
+        self.assertTrue(opt.freeze_converged)
+        self.assertTrue(opt.converged)
+        self.assertAlmostEqual(opt.e_avg_occ, -113.03118394153302, delta=1e-7)
+        self.assertAlmostEqual(opt.e_tot, -113.12691855942077, delta=1e-6)
+
     def test_h2o_triplet_roks(self):
         ground = self.mol0.RKS(xc='BHandHLYP')
         ground.grids.level = 0

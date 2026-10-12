@@ -66,3 +66,31 @@ class KnownValues(unittest.TestCase):
         self.assertTrue(mf.converged)
         self.assertAlmostEqual(mf.e_avg_occ, -151.18245418239550, delta=1e-7)
         self.assertAlmostEqual(mf.e_tot, -151.25619865161033, delta=1e-7)
+
+    def test_svwn_aocscf_newton(self):
+        mf = self.mol.ROKS(xc='SVWN').average_occ()
+        mf.conv_tol = 1e-11
+        mf.conv_tol_grad = 1e-6
+        mf.max_cycle = 200
+        mf.grids.level = 3
+        mf.grids.prune = None
+        mf.small_rho_cutoff = 0.0
+        mf = mf.newton().run()
+
+        self.assertTrue(mf.converged)
+        self.assertAlmostEqual(mf.e_avg_occ, -150.15324131943828, delta=1e-7)
+        self.assertAlmostEqual(mf.e_tot, -150.18135492533739, delta=1e-6)
+
+    def test_b3lyp_aocscf_newton_symmetry(self):
+        mol = gto.M(
+            atom='O 0 0 0; H 0 -.757 .587; H 0 .757 .587',
+            basis='6-31g', spin=2, symmetry=True, verbose=0)
+        mf = mol.ROKS(xc='B3LYP').average_occ()
+        mf.conv_tol = 1e-11
+        mf.conv_tol_grad = 1e-6
+        mf.grids.level = 0
+        mf = mf.newton().run()
+
+        self.assertTrue(mf.converged)
+        self.assertAlmostEqual(mf.e_avg_occ, -76.02438483647123, delta=1e-7)
+        self.assertAlmostEqual(mf.e_tot, -76.11623061296555, delta=1e-6)

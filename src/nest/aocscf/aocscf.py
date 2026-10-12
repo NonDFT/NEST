@@ -20,6 +20,7 @@
 import numpy as np
 from pyscf import dft, lib
 from pyscf.lib import logger
+from pyscf.soscf import newton_ah
 
 
 def get_veff(mf, mol=None, dm=None, dm_last=0, vhf_last=0, hermi=1):
@@ -34,6 +35,54 @@ def get_veff(mf, mol=None, dm=None, dm_last=0, vhf_last=0, hermi=1):
     veff = dft.rks.get_veff(mf, mol, dm, dm_last, vhf_last, hermi)
     # ROHF.get_fock expects separate alpha and beta blocks, even when equal.
     return lib.tag_array(np.asarray((veff, veff)), ecoul=veff.ecoul, exc=veff.exc, vj=veff.vj, vk=veff.vk)
+
+
+def gen_response(mf, mo_coeff=None, mo_occ=None, with_j=True, hermi=0, max_memory=None, with_nlc=True):
+    """Differentiate the common average-occupation potential in ROHF spin blocks."""
+    if mo_coeff is None:
+        mo_coeff = mf.mo_coeff
+    if mo_occ is None:
+        mo_occ = mf.mo_occ
+    # ROHF second-order solvers supply the shared orbitals and occupations
+    # as separate alpha/beta arrays. RKS needs the total occupations.
+    if np.ndim(mo_coeff) == 3:
+        mo_coeff = mo_coeff[0]
+    if np.ndim(mo_occ) == 2:
+        mo_occ = np.asarray(mo_occ).sum(axis=0)
+    response_mf = lib.view(mf, dft.rks.RKS)
+    # Keep the original J/K backend, including density fitting.
+    response_mf.get_jk = mf.get_jk
+    response_mf.get_j = mf.get_j
+    response_mf.get_k = mf.get_k
+    response = response_mf.gen_response(
+        mo_coeff, mo_occ, hermi=hermi, max_memory=max_memory, with_nlc=with_nlc)
+
+    def vind(dm1):
+        total_density = dm1[0] + dm1[1]
+        potential = response(total_density)
+        # RKS includes Coulomb response except for anti-Hermitian probes.
+        if not with_j and hermi != 2:
+            potential -= mf.get_j(dm=total_density, hermi=hermi)
+        return np.asarray((potential, potential))
+
+    return vind
+
+
+class SecondOrderAverageOccupationROKS(newton_ah._SecondOrderROHF):
+    def gen_g_hop(self, mo_coeff, mo_occ, fock_ao=None, h1e=None, with_symmetry=True):
+        # Retain the shared rotation's oo/vv terms and gradient transport,
+        # which PySCF's separate-spin ROHF Hessian omits away from convergence.
+        from nest.deltascf.sgm import gen_g_hop_rohf
+
+        return gen_g_hop_rohf(self, mo_coeff, mo_occ, fock_ao, h1e, with_symmetry)
+
+
+def newton(mf):
+    """Use PySCF's Newton driver with the shared-orbital AOCSCF Hessian."""
+    if isinstance(mf, newton_ah._CIAH_SOSCF):
+        return mf
+    cls = SecondOrderAverageOccupationROKS
+    return lib.set_class(cls(mf), (cls, mf.__class__))
 
 
 def _high_spin_energy_and_summary(mf):
@@ -92,6 +141,8 @@ class AverageOccupationROKS(dft.roks.ROKS):
         return dft.roks.ROKS._finalize(self)
 
     get_veff = get_veff
+    gen_response = gen_response
+    newton = newton
     nuc_grad_method = nuc_grad_method
     Gradients = nuc_grad_method
     dump_flags = dump_flags
@@ -110,6 +161,8 @@ class SymAdaptedAverageOccupationROKS(dft.rks_symm.SymAdaptedROKS):
         return dft.rks_symm.SymAdaptedROKS._finalize(self)
 
     get_veff = get_veff
+    gen_response = gen_response
+    newton = newton
     nuc_grad_method = nuc_grad_method
     Gradients = nuc_grad_method
     dump_flags = dump_flags
