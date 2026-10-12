@@ -36,7 +36,7 @@ import warnings
 import numpy as np
 from pyscf import gto
 
-from nest.nttda.nttda import _orbital_indices
+from nest.nttda.nttda import _orbital_indices, _dipole_integrals
 
 
 def _apply_e(state, p, q):
@@ -184,8 +184,8 @@ def _spin_elements(cross_s, cross_r, occupations, filled):
     return result
 
 
-def transition_properties(tdobj, ground, state=None, origin=None):
-    """RKS -> singlet NTTDA overlaps, length-gauge dipoles and strengths.
+def transition_properties(tdobj, ground, state=None, origin=None, gauge='length'):
+    """RKS -> singlet NTTDA overlaps, dipoles and oscillator strengths.
 
     Args:
         tdobj: Computed deltaS=-1 NTTDA on a two-SOMO triplet ROKS reference.
@@ -195,6 +195,9 @@ def transition_properties(tdobj, ground, state=None, origin=None):
             same AO basis/order. Its MOs may differ from the ROKS MOs.
         state: 1-based computed root or sequence of roots; None selects all.
         origin: Dipole origin in Bohr; None means (0, 0, 0).
+        gauge: 'length' (default) or 'velocity', selecting the oscillator
+            strength formula. The returned electronic_dipole and dipole
+            always contain length-gauge matrix elements, in either case.
 
     Returns:
         Dictionary of arrays, retaining a root axis even for one state:
@@ -205,6 +208,11 @@ def transition_properties(tdobj, ground, state=None, origin=None):
         (2/3) excitation_energy * |dipole|^2. Dipoles have shape (n_roots,3)
         and units ea0. ``dipole`` is the NEGATIVE of the physical total
         electric dipole, preserving NEST's positive electronic-r convention.
+        With gauge='velocity', also returns ``velocity_dipole`` =
+        i<RKS|sum p_i|I> (real, in atomic units), and oscillator_strength
+        instead uses (2/3)*|velocity_dipole|^2/excitation_energy. The physical
+        momentum is -i times velocity_dipole; divide velocity_dipole by the
+        excitation energy to compare its magnitude with a length dipole.
 
     No roots are filtered: de-excitation roots may give negative energies
     and strengths. All input SCF calculations and selected roots should be
@@ -213,10 +221,14 @@ def transition_properties(tdobj, ground, state=None, origin=None):
     Including the nuclear term makes neutral-system results origin invariant
     even for nonzero overlap. For charge Q, moving the origin by a gives
     dipole' = dipole + Q*a*overlap; a warning is emitted when Q != 0 and
-    max|overlap| > 1e-8. The states are not orthogonalized, so strengths are
-    an approximate use of the usual oscillator-strength expression.
+    max|overlap| > 1e-8 when requesting length-gauge strengths. Velocity
+    strengths are origin independent (also for ions) and need nonzero
+    excitation energies. The states are not orthogonalized, so strengths
+    in either gauge are approximate and need not agree.
     """
     mf, mol = tdobj._scf, tdobj._scf.mol
+    if gauge not in ('length', 'velocity'):
+        raise ValueError("gauge must be 'length' or 'velocity'")
     cg, ct = np.asarray(ground.mo_coeff), np.asarray(mf.mo_coeff)
     ground_occ, ref_occ = np.asarray(ground.mo_occ), np.asarray(mf.mo_occ)
     if (cg.ndim != 2 or ct.ndim != 2 or ground_occ.ndim != 1 or ref_occ.ndim != 1
@@ -248,8 +260,11 @@ def transition_properties(tdobj, ground, state=None, origin=None):
     cg = cg[:, ground_occ == 2]
     origin = np.zeros(3) if origin is None else np.asarray(origin, dtype=float)
     cross_s = cg.T @ ground.get_ovlp() @ ct
-    with mol.with_common_orig(origin):
-        dip_ao = mol.intor_symmetric('int1e_r', comp=3)
+    dip_ao = _dipole_integrals(mf, 'length', origin)
+    if gauge == 'velocity':
+        # Both gauges reuse the same determinant expansion and occupied
+        # overlap solves; only the one-electron integrals differ.
+        dip_ao = np.concatenate((dip_ao, _dipole_integrals(mf, 'velocity')))
     cross_r = np.einsum('up,xuv,vq->xpq', cg, dip_ao, ct, optimize=True)
 
     basis = list(_singlet_csfs(cs, os, vs, ct.shape[1], reference_cs))
@@ -266,7 +281,7 @@ def transition_properties(tdobj, ground, state=None, origin=None):
     filled = max(candidates, key=lambda occupied: np.linalg.svd(cross_s[:, occupied], compute_uv=False)[-1])
     elements = _spin_elements(cross_s, cross_r, spin_occupations, filled)
     basis_overlap = np.zeros(len(basis))
-    basis_dipole = np.zeros((len(basis), 3))
+    basis_dipole = np.zeros((len(basis), len(dip_ao)))
     for i, csf in enumerate(basis):
         for det, coefficient in csf.items():
             alpha, beta = occupations[det]
@@ -275,17 +290,25 @@ def transition_properties(tdobj, ground, state=None, origin=None):
             basis_overlap[i] += coefficient * sa * sb
             basis_dipole[i] += coefficient * (sb * ra + sa * rb)
     overlap = amplitudes @ basis_overlap
-    electronic = amplitudes @ basis_dipole
+    moments = amplitudes @ basis_dipole
+    electronic = moments[:, :3]
     nuclear = mol.atom_charges() @ (mol.atom_coords() - origin)
     dipole = electronic - overlap[:, None] * nuclear
     energy = mf.e_tot + np.asarray(tdobj.e)[states - 1] - ground.e_tot
     strength = (2.0 / 3.0) * energy * np.einsum('nx,nx->n', dipole, dipole)
-    if mol.charge != 0 and np.max(np.abs(overlap)) > 1e-8:
+    result = dict(state=states, overlap=overlap, electronic_dipole=electronic, dipole=dipole,
+                  excitation_energy=energy, oscillator_strength=strength)
+    if gauge == 'velocity':
+        if np.any(energy == 0):
+            raise ValueError('Velocity-gauge oscillator strengths require nonzero transition energies')
+        velocity = moments[:, 3:]
+        result['velocity_dipole'] = velocity
+        result['oscillator_strength'] = (2.0 / 3.0) * np.einsum('nx,nx->n', velocity, velocity) / energy
+    if gauge == 'length' and mol.charge != 0 and np.max(np.abs(overlap)) > 1e-8:
         warnings.warn(
             f'Nonorthogonal RKS/NTTDA states in a charged system (charge={mol.charge}, '
             f'max|overlap|={np.max(np.abs(overlap)):.3g}): transition dipoles and '
             'oscillator strengths depend on the chosen origin even with the nuclear term.',
             UserWarning, stacklevel=2,
         )
-    return dict(state=states, overlap=overlap, electronic_dipole=electronic, dipole=dipole,
-                excitation_energy=energy, oscillator_strength=strength)
+    return result

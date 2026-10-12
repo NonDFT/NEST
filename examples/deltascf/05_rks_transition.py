@@ -106,3 +106,22 @@ for i, state in enumerate(states):
 shifted = transition_properties(td, ground, state=states, origin=[1.0, -0.5, 0.2])
 np.testing.assert_allclose(shifted['dipole'], properties['dipole'], atol=1e-10, rtol=0)
 print('Neutral-system origin-shift check passed.')
+
+# Velocity gauge: return i<p> (the momentum's -i factor is omitted).
+# Compare |i<p>/dE| with the length dipole, not |i<p>| itself.
+velocity = transition_properties(td, ground, state=states, gauge='velocity')
+old_velocity = td.transition_velocity_dipole(ref=1, state=states)
+old_velocity_strength = td.oscillator_strength(ref=1, state=states, gauge='velocity')
+print('\nVelocity/length comparison, retaining the energy zero for each initial state:')
+print('root   |dL_NT|    |dV_NT|    fV/fL_NT    |dL_RKS|   |dV_RKS|   fV/fL_RKS')
+for i, state in enumerate(states):
+    old_gap = td.e[state - 1] - td.e[0]
+    new_gap = velocity['excitation_energy'][i]
+    print(f'{state:3d}  {np.linalg.norm(old_dipole[i]):10.6f}'
+          f'  {np.linalg.norm(old_velocity[i]) / abs(old_gap):10.6f}'
+          f'  {old_velocity_strength[i] / old_strength[i]:10.5f}'
+          f'  {np.linalg.norm(properties["dipole"][i]):10.6f}'
+          f'  {np.linalg.norm(velocity["velocity_dipole"][i]) / abs(new_gap):10.6f}'
+          f'  {velocity["oscillator_strength"][i] / properties["oscillator_strength"][i]:10.5f}')
+# ROKS is a triplet *reference*, not the initial singlet in either comparison.
+# Its direct electric-dipole transition to a singlet is spin forbidden here.

@@ -19,7 +19,7 @@ import numpy as np
 from pyscf import fci, gto
 
 from nest.nttda import NTTDA, rks
-from nest.nttda.nttda import transition_dm, _orbital_indices
+from nest.nttda.nttda import transition_dm, _orbital_indices, _dipole_integrals
 
 
 def direct_element(matrix, operator):
@@ -196,6 +196,67 @@ class RksTransitionTests(unittest.TestCase):
         actual = rks.transition_properties(frozen, ground)
         for key in expected:
             np.testing.assert_allclose(actual[key], expected[key], atol=2e-14, rtol=0)
+
+    def test_velocity_operator_sign_by_overlap_derivative(self):
+        ground, _ = make_problem()
+        mol = ground.mol
+        step = 1e-4
+        derivative = []
+        for axis in range(3):
+            displacement = np.eye(3)[axis] * step
+            plus = mol.copy().set_geom_(mol.atom_coords() + displacement, unit='Bohr')
+            minus = mol.copy().set_geom_(mol.atom_coords() - displacement, unit='Bohr')
+            derivative.append((gto.intor_cross('int1e_ovlp', mol, plus)
+                               - gto.intor_cross('int1e_ovlp', mol, minus)) / (2 * step))
+        # Moving every ket center differentiates -nabla acting on the ket.
+        velocity = _dipole_integrals(ground, 'velocity')
+        np.testing.assert_allclose(velocity, -np.array(derivative), atol=2e-9, rtol=0)
+        np.testing.assert_allclose(velocity, -velocity.transpose(0, 2, 1), atol=1e-14, rtol=0)
+
+    def test_velocity_matrix_elements_against_full_ci(self):
+        ground, td = make_problem()
+        ci, _, strings = full_ci_states(td)
+        ct = td._scf.mo_coeff
+        momentum = -ground.mol.intor('int1e_ipovlp', comp=3, hermi=0)
+        momentum_mo = np.einsum('up,xuv,vq->xpq', ct, momentum, ct)
+        for i, bra in enumerate(ci):
+            for j, ket in enumerate(ci):
+                if i == j:
+                    continue
+                gamma = fci.direct_spin1.trans_rdm1(bra, ket, 4, (2, 2)).T
+                expected = np.einsum('pq,xpq->x', gamma, momentum_mo)
+                np.testing.assert_allclose(td.transition_velocity_dipole(ref=i + 1, state=j + 1)[0],
+                                           expected, atol=2e-14, rtol=0)
+                self.assertAlmostEqual(td.oscillator_strength(ref=i + 1, state=j + 1, gauge='velocity'),
+                                       (2 / 3) * np.dot(expected, expected) / (td.e[j] - td.e[i]), delta=2e-14)
+        transform = ct.T @ ground.get_ovlp() @ ground.mo_coeff[:, ground.mo_occ == 2]
+        coefficients = [np.linalg.det(transform[[p for p in range(4) if (s >> p) & 1]]) for s in strings]
+        bra = np.outer(coefficients, coefficients)
+        actual = rks.transition_properties(td, ground, gauge='velocity')
+        for i, ket in enumerate(ci):
+            gamma = fci.direct_spin1.trans_rdm1(bra, ket, 4, (2, 2)).T
+            expected = np.einsum('pq,xpq->x', gamma, momentum_mo)
+            np.testing.assert_allclose(actual['velocity_dipole'][i], expected, atol=2e-14, rtol=0)
+            self.assertAlmostEqual(actual['oscillator_strength'][i],
+                                   (2 / 3) * np.dot(expected, expected) / (td.e[i] + 0.5), delta=2e-14)
+        length = rks.transition_properties(td, ground)
+        np.testing.assert_allclose(actual['dipole'], length['dipole'], atol=2e-14, rtol=0)
+
+    def test_velocity_charged_origin_independence_and_zero_energy(self):
+        ground, td = make_problem(charge=2)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            original = rks.transition_properties(td, ground, gauge='velocity')
+            shifted = rks.transition_properties(td, ground, origin=[1, 2, 3], gauge='velocity')
+        self.assertEqual(len(caught), 0)
+        for key in ('velocity_dipole', 'oscillator_strength'):
+            np.testing.assert_allclose(shifted[key], original[key], atol=1e-14, rtol=0)
+        td.e[1] = td.e[0]
+        with self.assertRaisesRegex(ValueError, 'nonzero transition energies'):
+            td.oscillator_strength(state=2, gauge='velocity')
+        td.e[0] = ground.e_tot - td._scf.e_tot
+        with self.assertRaisesRegex(ValueError, 'nonzero transition energies'):
+            rks.transition_properties(td, ground, state=1, gauge='velocity')
 
     def test_unsupported_inputs(self):
         ground, td = make_problem()

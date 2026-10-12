@@ -18,6 +18,8 @@
 # Author: Tai Wang <wtpeter@pku.edu.cn>
 #
 
+from contextlib import nullcontext
+
 import numpy as np
 from pyscf import lib
 from pyscf import dft
@@ -1244,6 +1246,24 @@ def transition_dm(tdobj, bra, ket):
     return gamma
 
 
+def _dipole_integrals(mf, gauge, origin=None):
+    """AO r or i*p (= nabla), for length/velocity electric-dipole strengths."""
+    mol = mf.mol
+    if gauge == 'length':
+        with mol.with_common_orig(origin) if origin is not None else nullcontext():
+            return mol.intor_symmetric('int1e_r', comp=3)
+    if gauge != 'velocity':
+        raise ValueError("gauge must be 'length' or 'velocity'")
+    if mol.ecp or mol.pseudo:
+        raise NotImplementedError('Velocity-gauge ECP/pseudopotential commutator corrections are not implemented')
+    if getattr(mf, 'with_x2c', None) is not None:
+        raise NotImplementedError('X2C velocity operators are not implemented here')
+    # int1e_ipovlp differentiates the BRA: <nabla mu|nu> = -<mu|nabla nu>.
+    # Return <mu|nabla|nu> = i<mu|p|nu>, matching PySCF's velocity-dipole
+    # sign. The physical momentum is -i times this real antisymmetric matrix.
+    return -mol.intor('int1e_ipovlp', comp=3, hermi=0)
+
+
 def transition_dipole(tdobj, ref=1, state=None):
     """Return <ref|r|state> in length gauge, shape (n_targets, 3).
 
@@ -1255,6 +1275,23 @@ def transition_dipole(tdobj, ref=1, state=None):
         ref: 1-based index of reference root.
         state: 1-based index or sequence of indices of target roots. None for all roots except ref.
     """
+    return _transition_moment(tdobj, ref, state, 'length')
+
+
+def transition_velocity_dipole(tdobj, ref=1, state=None):
+    """Return i<ref|sum p|state>, shape (n_targets, 3), in atomic units.
+
+    The omitted factor -i recovers the momentum matrix element. This is
+    PySCF's velocity-dipole sign convention; for real states the result is
+    real and changes sign under bra/ket exchange. Divide by the transition
+    energy to compare its magnitude with the length dipole. Uses the same
+    1-based indices as transition_dipole. No nuclear term is included for
+    fixed nuclei. Currently requires an all-electron nonrelativistic model.
+    """
+    return _transition_moment(tdobj, ref, state, 'velocity')
+
+
+def _transition_moment(tdobj, ref, state, gauge):
     if not 1 <= ref <= len(tdobj.xy):
         raise ValueError('ref must index a computed root (1-based)')
     if np.isscalar(state) and state == ref:
@@ -1266,7 +1303,7 @@ def transition_dipole(tdobj, ref=1, state=None):
     states = states[states != ref] - 1
     mf = tdobj._scf
     coeff = np.asarray(mf.mo_coeff)
-    dip_ao = mf.mol.intor_symmetric('int1e_r', comp=3)
+    dip_ao = _dipole_integrals(mf, gauge)
     dip_mo = lib.einsum('up,xuv,vq->xpq', coeff.conj(), dip_ao, coeff)
     dtype = np.result_type(dip_mo, tdobj.xy[ref - 1][0], *[tdobj.xy[i][0] for i in states])
     pol = np.empty((len(states), 3), dtype=dtype)
@@ -1276,12 +1313,14 @@ def transition_dipole(tdobj, ref=1, state=None):
     return pol
 
 
-def oscillator_strength(tdobj, ref=1, state=None):
-    """Length-gauge oscillator strengths between computed NTTDA roots.
+def oscillator_strength(tdobj, ref=1, state=None, gauge='length'):
+    """Length- or velocity-gauge strengths between computed NTTDA roots.
 
     Uses the same 1-based indices as transition_dipole. Downward transitions
     retain negative energy differences. A scalar state returns a scalar;
-    a sequence or None returns an array.
+    a sequence or None returns an array. Length (the default) uses
+    (2/3)*dE*|r|^2; velocity uses (2/3)*|p|^2/dE and requires nonzero dE.
+    Gauge agreement is not guaranteed for the approximate NTTDA states.
     """
     if not 1 <= ref <= len(tdobj.xy):
         raise ValueError('ref must index a computed root (1-based)')
@@ -1292,9 +1331,18 @@ def oscillator_strength(tdobj, ref=1, state=None):
     else:
         states = np.atleast_1d(state).astype(int)
     states = states[states != ref] - 1
-    dip = transition_dipole(tdobj, ref, states + 1)
     de = np.asarray(tdobj.e)[states] - tdobj.e[ref - 1]
-    strength = (2. / 3.) * de * np.einsum('nx,nx->n', dip.conj(), dip).real
+    if gauge == 'length':
+        dip = transition_dipole(tdobj, ref, states + 1)
+        factor = de
+    elif gauge == 'velocity':
+        if np.any(de == 0):
+            raise ValueError('Velocity-gauge oscillator strengths require nonzero transition energies')
+        dip = transition_velocity_dipole(tdobj, ref, states + 1)
+        factor = 1 / de
+    else:
+        raise ValueError("gauge must be 'length' or 'velocity'")
+    strength = (2. / 3.) * factor * np.einsum('nx,nx->n', dip.conj(), dip).real
     if np.isscalar(state):
         return strength[0]
     else:
@@ -1302,6 +1350,7 @@ def oscillator_strength(tdobj, ref=1, state=None):
 
 
 NTTDA.transition_dipole = transition_dipole
+NTTDA.transition_velocity_dipole = transition_velocity_dipole
 NTTDA.oscillator_strength = oscillator_strength
 
 

@@ -93,6 +93,17 @@ Noncollinear TDDFT         Noncollinear SF-TDDFT      Noncollinear Tensor TDA
   The core SOMO cannot be frozen, so freezing other occupied orbitals does
   not enforce a fixed core hole.
 
+  Both NTTDA-root transitions and RKS-to-NTTDA transitions support velocity
+  gauge: `td.oscillator_strength(ref=1, state=[6, 7], gauge='velocity')` or
+  `transition_properties(td, ground, state=[6, 7], gauge='velocity')`.
+  The latter additionally returns `velocity_dipole`, while its `dipole`
+  fields still contain length-gauge values. Velocity moments represent
+  `i * <bra|sum p|ket>` (the physical momentum is `-i` times the result).
+  Divide by the corresponding transition energy to compare dipole magnitudes.
+  Velocity strengths use `(2/3)*|p|^2/dE`, are origin independent even for
+  ions, and need not equal length-gauge strengths for approximate states.
+  ECP/pseudopotential velocity corrections are not implemented.
+
 
 ## Authors
 
