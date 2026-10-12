@@ -24,8 +24,9 @@ It remains valid when M is singular; det(M) * inv(M) must not be used
 for such a target determinant. See Burton, J. Chem. Phys. 154, 144109
 (2021), https://doi.org/10.1063/5.0045442, for nonorthogonal matrix elements.
 
-Only real, nonrelativistic orbitals are supported, with a closed-shell RKS
-bra and a two-SOMO triplet ROKS reference for deltaS=-1 NTTDA. The states
+Only real orbitals are supported (nonrelativistic or matching sfX2C1e),
+with a closed-shell RKS bra and a two-SOMO triplet ROKS reference for
+deltaS=-1 NTTDA. The states
 are used as supplied, without an extra orthogonalization or OO projection.
 These are matrix elements of the determinant/CSF model wavefunctions,
 not a TDDFT response derivation for independently optimized states.
@@ -184,7 +185,7 @@ def _spin_elements(cross_s, cross_r, occupations, filled):
     return result
 
 
-def transition_properties(tdobj, ground, state=None, origin=None, gauge='length'):
+def transition_properties(tdobj, ground, state=None, origin=None, gauge='length', picture_change=True):
     """RKS -> singlet NTTDA overlaps, dipoles and oscillator strengths.
 
     Args:
@@ -198,6 +199,10 @@ def transition_properties(tdobj, ground, state=None, origin=None, gauge='length'
         gauge: 'length' (default) or 'velocity', selecting the oscillator
             strength formula. The returned electronic_dipole and dipole
             always contain length-gauge matrix elements, in either case.
+        picture_change: Apply sfX2C1e picture change to r and Dirac velocity
+            c*alpha (default True). False uses bare nonrelativistic r/p
+            integrals as a diagnostic. Both SCF objects must use matching
+            sfX2C1e settings; auxiliary X2C basis sets are not supported.
 
     Returns:
         Dictionary of arrays, retaining a root axis even for one state:
@@ -209,9 +214,10 @@ def transition_properties(tdobj, ground, state=None, origin=None, gauge='length'
         and units ea0. ``dipole`` is the NEGATIVE of the physical total
         electric dipole, preserving NEST's positive electronic-r convention.
         With gauge='velocity', also returns ``velocity_dipole`` =
-        i<RKS|sum p_i|I> (real, in atomic units), and oscillator_strength
+        i<RKS|sum v_i|I> (real, in atomic units), and oscillator_strength
         instead uses (2/3)*|velocity_dipole|^2/excitation_energy. The physical
-        momentum is -i times velocity_dipole; divide velocity_dipole by the
+        velocity is -i times velocity_dipole; v=p in the nonrelativistic
+        model and is picture-changed c*alpha for sfX2C1e. Divide velocity_dipole by the
         excitation energy to compare its magnitude with a length dipole.
 
     No roots are filtered: de-excitation roots may give negative energies
@@ -245,8 +251,19 @@ def transition_properties(tdobj, ground, state=None, origin=None, gauge='length'
             or not np.allclose(ground.mol.atom_coords(), mol.atom_coords(), atol=1e-10, rtol=0)
             or not gto.same_basis_set(ground.mol, mol)):
         raise ValueError('RKS and NTTDA must use the same geometry and AO basis/order')
-    if getattr(ground, 'with_x2c', None) is not None or getattr(mf, 'with_x2c', None) is not None:
-        raise NotImplementedError('X2C transition operators are not implemented here')
+    gx = getattr(ground, 'with_x2c', None) or None
+    tx = getattr(mf, 'with_x2c', None) or None
+    if (gx is None) != (tx is None):
+        raise ValueError('RKS and ROKS must use the same nonrelativistic or sfX2C1e representation')
+    if gx is not None:
+        from pyscf.x2c.sfx2c1e import SpinFreeX2CHelper
+        if not isinstance(gx, SpinFreeX2CHelper) or not isinstance(tx, SpinFreeX2CHelper):
+            raise NotImplementedError('Only spin-free X2C1e transition operators are supported')
+        # For 1e X2C the decoupling is state independent. With the same
+        # geometry, AO basis and helper settings, both states share a
+        # representation and the ordinary AO overlap metric is valid.
+        if any(getattr(gx, key) != getattr(tx, key) for key in ('approx', 'basis', 'xuncontract')):
+            raise ValueError('RKS and ROKS must use matching sfX2C1e decoupling settings')
     states = np.arange(1, len(tdobj.xy) + 1) if state is None else np.atleast_1d(state)
     if states.ndim != 1 or not len(states) or np.any(states != states.astype(int)):
         raise ValueError('state must contain integer computed-root indices (1-based)')
@@ -260,11 +277,11 @@ def transition_properties(tdobj, ground, state=None, origin=None, gauge='length'
     cg = cg[:, ground_occ == 2]
     origin = np.zeros(3) if origin is None else np.asarray(origin, dtype=float)
     cross_s = cg.T @ ground.get_ovlp() @ ct
-    dip_ao = _dipole_integrals(mf, 'length', origin)
+    dip_ao = _dipole_integrals(mf, 'length', origin, picture_change=picture_change)
     if gauge == 'velocity':
         # Both gauges reuse the same determinant expansion and occupied
         # overlap solves; only the one-electron integrals differ.
-        dip_ao = np.concatenate((dip_ao, _dipole_integrals(mf, 'velocity')))
+        dip_ao = np.concatenate((dip_ao, _dipole_integrals(mf, 'velocity', picture_change=picture_change)))
     cross_r = np.einsum('up,xuv,vq->xpq', cg, dip_ao, ct, optimize=True)
 
     basis = list(_singlet_csfs(cs, os, vs, ct.shape[1], reference_cs))

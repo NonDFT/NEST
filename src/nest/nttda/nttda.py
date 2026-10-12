@@ -1246,25 +1246,47 @@ def transition_dm(tdobj, bra, ket):
     return gamma
 
 
-def _dipole_integrals(mf, gauge, origin=None):
-    """AO r or i*p (= nabla), for length/velocity electric-dipole strengths."""
+def _dipole_integrals(mf, gauge, origin=None, picture_change=True):
+    """AO r or i*v; sfX2C1e uses picture-changed r and Dirac c*alpha."""
     mol = mf.mol
+    x2c = getattr(mf, 'with_x2c', None) or None  # PySCF also uses False to disable X2C.
+    if x2c is not None:
+        from pyscf.x2c.sfx2c1e import SpinFreeX2CHelper
+        if not isinstance(x2c, SpinFreeX2CHelper):
+            raise NotImplementedError('Only spin-free X2C1e transition operators are supported')
+        if x2c.basis is not None:
+            raise NotImplementedError('An auxiliary X2C basis is not supported for transition operators')
     if gauge == 'length':
         with mol.with_common_orig(origin) if origin is not None else nullcontext():
+            if x2c is not None and picture_change:
+                # Same spin-free r picture change as PySCF's dip_moment:
+                # LL=r; SS=(sigma.p) r (sigma.p)/(4c^2), spin trace only.
+                xmol = x2c.get_xmol()[0]
+                prp = xmol.intor_symmetric('int1e_sprsp').reshape(3, 4, xmol.nao, xmol.nao)[:, 3]
+                return x2c.picture_change(('int1e_r', prp / (4 * lib.param.LIGHT_SPEED**2)))
             return mol.intor_symmetric('int1e_r', comp=3)
     if gauge != 'velocity':
         raise ValueError("gauge must be 'length' or 'velocity'")
     if mol.ecp or mol.pseudo:
         raise NotImplementedError('Velocity-gauge ECP/pseudopotential commutator corrections are not implemented')
-    if getattr(mf, 'with_x2c', None) is not None:
-        raise NotImplementedError('X2C velocity operators are not implemented here')
+    if x2c is not None and picture_change:
+        # Velocity is c*alpha, NOT canonical p. In a restricted-kinetic-
+        # balance basis its spin-free LS/SL blocks are both p/2. Pass the
+        # physical Hermitian (pure imaginary) block: picture_change supplies
+        # its conjugate transpose in SL. A real antisymmetric block here
+        # would have the wrong sign and an incorrect nonrelativistic limit.
+        # Dirac operator: https://www.diracprogram.org/doc/release-14/tutorials/dft/tddft.html
+        xmol = x2c.get_xmol()[0]
+        ls = 0.5j * xmol.intor('int1e_ipovlp', comp=3, hermi=0)
+        velocity = x2c.picture_change(odd_operator=ls)
+        return (1j * velocity).real
     # int1e_ipovlp differentiates the BRA: <nabla mu|nu> = -<mu|nabla nu>.
     # Return <mu|nabla|nu> = i<mu|p|nu>, matching PySCF's velocity-dipole
     # sign. The physical momentum is -i times this real antisymmetric matrix.
     return -mol.intor('int1e_ipovlp', comp=3, hermi=0)
 
 
-def transition_dipole(tdobj, ref=1, state=None):
+def transition_dipole(tdobj, ref=1, state=None, picture_change=True):
     """Return <ref|r|state> in length gauge, shape (n_targets, 3).
 
     Targets exclude ref. With state=None, n_targets = len(tdobj.xy) - 1;
@@ -1274,24 +1296,28 @@ def transition_dipole(tdobj, ref=1, state=None):
         tdobj: NTTDA object with computed roots.
         ref: 1-based index of reference root.
         state: 1-based index or sequence of indices of target roots. None for all roots except ref.
+        picture_change: Apply sfX2C1e operator picture change when present.
+            False uses bare nonrelativistic integrals for comparison only.
     """
-    return _transition_moment(tdobj, ref, state, 'length')
+    return _transition_moment(tdobj, ref, state, 'length', picture_change)
 
 
-def transition_velocity_dipole(tdobj, ref=1, state=None):
-    """Return i<ref|sum p|state>, shape (n_targets, 3), in atomic units.
+def transition_velocity_dipole(tdobj, ref=1, state=None, picture_change=True):
+    """Return i<ref|sum v|state>, shape (n_targets, 3), in atomic units.
 
-    The omitted factor -i recovers the momentum matrix element. This is
+    The omitted factor -i recovers the velocity matrix element. This is
     PySCF's velocity-dipole sign convention; for real states the result is
     real and changes sign under bra/ket exchange. Divide by the transition
     energy to compare its magnitude with the length dipole. Uses the same
     1-based indices as transition_dipole. No nuclear term is included for
-    fixed nuclei. Currently requires an all-electron nonrelativistic model.
+    fixed nuclei. For all-electron nonrelativistic models v=p; sfX2C1e
+    instead picture-changes Dirac c*alpha. picture_change=False uses bare
+    nonrelativistic p integrals for comparison, not the X2C velocity.
     """
-    return _transition_moment(tdobj, ref, state, 'velocity')
+    return _transition_moment(tdobj, ref, state, 'velocity', picture_change)
 
 
-def _transition_moment(tdobj, ref, state, gauge):
+def _transition_moment(tdobj, ref, state, gauge, picture_change):
     if not 1 <= ref <= len(tdobj.xy):
         raise ValueError('ref must index a computed root (1-based)')
     if np.isscalar(state) and state == ref:
@@ -1303,7 +1329,7 @@ def _transition_moment(tdobj, ref, state, gauge):
     states = states[states != ref] - 1
     mf = tdobj._scf
     coeff = np.asarray(mf.mo_coeff)
-    dip_ao = _dipole_integrals(mf, gauge)
+    dip_ao = _dipole_integrals(mf, gauge, picture_change=picture_change)
     dip_mo = lib.einsum('up,xuv,vq->xpq', coeff.conj(), dip_ao, coeff)
     dtype = np.result_type(dip_mo, tdobj.xy[ref - 1][0], *[tdobj.xy[i][0] for i in states])
     pol = np.empty((len(states), 3), dtype=dtype)
@@ -1313,13 +1339,15 @@ def _transition_moment(tdobj, ref, state, gauge):
     return pol
 
 
-def oscillator_strength(tdobj, ref=1, state=None, gauge='length'):
+def oscillator_strength(tdobj, ref=1, state=None, gauge='length', picture_change=True):
     """Length- or velocity-gauge strengths between computed NTTDA roots.
 
     Uses the same 1-based indices as transition_dipole. Downward transitions
     retain negative energy differences. A scalar state returns a scalar;
     a sequence or None returns an array. Length (the default) uses
-    (2/3)*dE*|r|^2; velocity uses (2/3)*|p|^2/dE and requires nonzero dE.
+    (2/3)*dE*|r|^2; velocity uses (2/3)*|v|^2/dE and requires nonzero dE.
+    sfX2C1e operators include picture change by default; False uses bare
+    nonrelativistic operators for a diagnostic comparison.
     Gauge agreement is not guaranteed for the approximate NTTDA states.
     """
     if not 1 <= ref <= len(tdobj.xy):
@@ -1333,12 +1361,12 @@ def oscillator_strength(tdobj, ref=1, state=None, gauge='length'):
     states = states[states != ref] - 1
     de = np.asarray(tdobj.e)[states] - tdobj.e[ref - 1]
     if gauge == 'length':
-        dip = transition_dipole(tdobj, ref, states + 1)
+        dip = transition_dipole(tdobj, ref, states + 1, picture_change=picture_change)
         factor = de
     elif gauge == 'velocity':
         if np.any(de == 0):
             raise ValueError('Velocity-gauge oscillator strengths require nonzero transition energies')
-        dip = transition_velocity_dipole(tdobj, ref, states + 1)
+        dip = transition_velocity_dipole(tdobj, ref, states + 1, picture_change=picture_change)
         factor = 1 / de
     else:
         raise ValueError("gauge must be 'length' or 'velocity'")

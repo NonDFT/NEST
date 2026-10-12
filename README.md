@@ -84,8 +84,7 @@ Noncollinear TDDFT         Noncollinear SF-TDDFT      Noncollinear Tensor TDA
   Neutral-system results are origin invariant; charged systems with nonzero
   overlap issue a warning. The states are not orthogonalized, and the usual
   oscillator-strength formula is applied to these approximate states.
-  X2C is not supported by this interface. See the commented
-  [C1 CH4 example](examples/deltascf/05_rks_transition.py), including a
+  See the commented [C1 CH4 example](examples/deltascf/05_rks_transition.py), including a
   comparison with the existing NTTDA-root transition dipoles.
 
   `td.frozen` also applies to this interface. Frozen closed orbitals stay
@@ -98,11 +97,23 @@ Noncollinear TDDFT         Noncollinear SF-TDDFT      Noncollinear Tensor TDA
   `transition_properties(td, ground, state=[6, 7], gauge='velocity')`.
   The latter additionally returns `velocity_dipole`, while its `dipole`
   fields still contain length-gauge values. Velocity moments represent
-  `i * <bra|sum p|ket>` (the physical momentum is `-i` times the result).
+  `i * <bra|sum v|ket>` (the physical velocity is `-i` times the result;
+  nonrelativistically `v=p`).
   Divide by the corresponding transition energy to compare dipole magnitudes.
-  Velocity strengths use `(2/3)*|p|^2/dE`, are origin independent even for
+  Velocity strengths use `(2/3)*|v|^2/dE`, are origin independent even for
   ions, and need not equal length-gauge strengths for approximate states.
   ECP/pseudopotential velocity corrections are not implemented.
+
+  FR, SGM and NTTDA energies also work with a real `mf.sfx2c1e()` reference.
+  Apply `sfx2c1e()` before FR/SGM; `undo_sgm()` retains the X2C Hamiltonian.
+  Length and velocity operators include spin-free one-electron picture
+  change by default. Velocity transforms Dirac `c*alpha`, rather than the
+  canonical momentum. `picture_change=False` uses bare nonrelativistic
+  operators for comparison. RKS and ROKS must share the same sfX2C1e
+  decoupling settings; auxiliary X2C basis sets are not supported here.
+  This retains PySCF's nonrelativistic two-electron approximation and adds
+  no X2C nuclear gradients. The [sfX2C1e example](examples/deltascf/06_sfx2c1e_transition.py)
+  compares FR/SGM, gauges, and the effect of property picture change.
 
 
 ## Authors

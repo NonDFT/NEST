@@ -268,7 +268,11 @@ class RksTransitionTests(unittest.TestCase):
             rks.transition_properties(td, ground)
         td.deltaS = -1
         ground = ground.sfx2c1e()
-        with self.assertRaisesRegex(NotImplementedError, 'X2C'):
+        with self.assertRaisesRegex(ValueError, 'representation'):
+            rks.transition_properties(td, ground)
+        td._scf = td._scf.sfx2c1e()
+        td._scf.with_x2c.xuncontract = False
+        with self.assertRaisesRegex(ValueError, 'decoupling settings'):
             rks.transition_properties(td, ground)
 
 
