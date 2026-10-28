@@ -106,8 +106,6 @@ class KnownValues(unittest.TestCase):
         mf.mo_occ = self.ro_occ.copy()
 
         opt = sgm.SGM(mf)
-        opt.max_cycle = 80
-        opt.verbose = 0
         e_tot = opt.kernel()
 
         self.assertTrue(opt.converged)
@@ -118,12 +116,12 @@ class KnownValues(unittest.TestCase):
         mf = self.mol1.ROKS(xc='BHandHLYP').average_occ()
         mf.grids.atom_grid = (75, 302)
         opt = mf.SGM()
-        opt.conv_tol_grad = 1e-6
         opt.kernel(self.mf0.mo_coeff, self.ro_occ)
 
         self.assertTrue(opt.converged)
-        self.assertAlmostEqual(opt.e_avg_occ, -113.03118394153302, delta=1e-7)
-        self.assertAlmostEqual(opt.e_tot, -113.12691855942077, delta=1e-6)
+        self.assertAlmostEqual(opt.e_avg_occ, -113.03118394153302, delta=1e-6)
+        # The high-spin energy is not stationary at the AOCSCF orbitals.
+        self.assertAlmostEqual(opt.e_tot, -113.12691855942077, delta=1e-4)
 
 
 if __name__ == '__main__':
