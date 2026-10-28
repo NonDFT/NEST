@@ -56,14 +56,6 @@ Noncollinear TDDFT         Noncollinear SF-TDDFT      Noncollinear Tensor TDA
   - NADC *(in progress)*
   - SOC
 
-  `td.Gradients().kernel(state=n)` returns the gradient of the selected total
-  energy (`state=1` is the lowest NTTDA root; `state=0` is the reference).
-  `td.Gradients().as_scanner(state=n)` provides the energy and gradient for geometry optimization.
-  Analytic DFT gradients omit numerical grid response; finite-difference checks
-  use fixed grids by default. Density fitting, X2C, solvent response, and NLC
-  are not supported by the NTTDA gradient driver.
-  See the [AOCSCF gradient example](examples/nttda/02_nttda_aocscf_grad.py).
-
 
 ## Authors
 
@@ -95,7 +87,7 @@ Benchmark calculations and validation.
 | Noncollinear DFT | Zhichen Pu, Qiming Sun |
 | Noncollinear TDDFT | Hao Li, Qiming Sun |
 | Noncollinear SF-TDA / SF-TDDFT | Hao Li, Tai Wang |
-| Analytic Nuclear Gradients | Hao Li, Tai Wang |
+| Analytic Nuclear Gradients | Hao Li, Tai Wang, Yu Jing |
 | Analytic Nonadiabatic Derivative Couplings (NADC) | Yu Jing, Tai Wang |
 | Oscillator Strengths | Tai Wang |
 | Noncollinear Tensor TDA (NT-TDA) | Tai Wang, Wenxian Qin |

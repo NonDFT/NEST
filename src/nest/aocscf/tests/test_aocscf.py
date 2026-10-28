@@ -66,3 +66,64 @@ class KnownValues(unittest.TestCase):
         self.assertTrue(mf.converged)
         self.assertAlmostEqual(mf.e_avg_occ, -151.18245418239550, delta=1e-7)
         self.assertAlmostEqual(mf.e_tot, -151.25619865161033, delta=1e-7)
+
+    def test_svwn_aocscf_newton(self):
+        mf = self.mol.ROKS(xc='SVWN').average_occ()
+        mf.conv_tol = 1e-11
+        mf.conv_tol_grad = 1e-6
+        mf.max_cycle = 200
+        mf.grids.level = 3
+        mf.grids.prune = None
+        mf.small_rho_cutoff = 0.0
+        mf = mf.newton().run()
+
+        self.assertTrue(mf.converged)
+        self.assertAlmostEqual(mf.e_avg_occ, -150.15324131943828, delta=1e-7)
+        self.assertAlmostEqual(mf.e_tot, -150.18135492533739, delta=1e-6)
+
+    def test_b3lyp_aocscf_newton_symmetry(self):
+        mol = gto.M(
+            atom='O 0 0 0; H 0 -.757 .587; H 0 .757 .587',
+            basis='6-31g', spin=2, symmetry=True, verbose=0)
+        mf = mol.ROKS(xc='B3LYP').average_occ()
+        mf.conv_tol = 1e-11
+        mf.conv_tol_grad = 1e-6
+        mf.grids.level = 0
+        mf = mf.newton().run()
+
+        self.assertTrue(mf.converged)
+        self.assertAlmostEqual(mf.e_avg_occ, -76.02438483647123, delta=1e-7)
+        self.assertAlmostEqual(mf.e_tot, -76.11623061296555, delta=1e-6)
+
+    def test_sfx2c1e_aocscf(self):
+        reference = self.mol.ROKS(xc='B3LYP').sfx2c1e()
+        reference.grids.level = 0
+        mf = reference.average_occ().run()
+
+        self.assertTrue(mf.converged)
+        self.assertIs(mf.with_x2c, reference.with_x2c)
+        self.assertAlmostEqual(mf.e_tot, reference.energy_tot(dm=mf.make_rdm1()), delta=1e-9)
+        self.assertAlmostEqual(mf.e_avg_occ, mf.energy_tot(), delta=1e-9)
+
+    def test_aocscf_df_sfx2c1e(self):
+        reference = self.mol.ROKS(xc='B3LYP').density_fit().sfx2c1e()
+        reference.grids.level = 0
+        mf = self.mol.ROKS(xc='B3LYP').average_occ().density_fit().sfx2c1e()
+        mf.grids = reference.grids
+        mf.run()
+
+        self.assertTrue(mf.converged)
+        self.assertAlmostEqual(mf.e_tot, reference.energy_tot(dm=mf.make_rdm1()), delta=1e-9)
+        self.assertAlmostEqual(mf.e_avg_occ, mf.energy_tot(), delta=1e-9)
+
+    def test_newton_aocscf_sfx2c1e(self):
+        reference = self.mol.ROKS(xc='B3LYP').sfx2c1e()
+        reference.grids.level = 0
+        mf = self.mol.ROKS(xc='B3LYP').newton().average_occ().sfx2c1e()
+        mf.grids = mf._scf.grids = reference.grids
+        mf.run()
+
+        self.assertTrue(mf.converged)
+        self.assertIs(mf.with_x2c, mf._scf.with_x2c)
+        self.assertAlmostEqual(mf.e_tot, reference.energy_tot(dm=mf.make_rdm1()), delta=1e-9)
+        self.assertAlmostEqual(mf.e_avg_occ, mf.remove_soscf().energy_tot(), delta=1e-9)
