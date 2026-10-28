@@ -19,7 +19,7 @@ import numpy as np
 from pyscf import gto
 from pyscf.data import nist
 from nest.deltascf import fr
-from nest.nttda.rks import transition_properties
+from nest.deltascf.rks import transition_properties
 
 mol = gto.M(
     atom="""

@@ -184,6 +184,7 @@ class KnownValues(unittest.TestCase):
         self.assertTrue(mf.converged)
         # Different active spaces must map to the same MO indices in SOC.
         # Indices 0 and 1 are O 1s orbitals; -1 is the last virtual orbital.
+        # SOC block comparisons below use an absolute tolerance of 5e-4 cm^-1.
         td0 = mf.NTTDA(frozen=[1, -1]).set(deltaS=0, nstates=1).run()
         tdm1 = mf.NTTDA(frozen=2).set(deltaS=-1, nstates=2).run()
         tdp1 = mf.NTTDA(frozen=[0, 1, -1]).set(deltaS=1, nstates=2).run()

@@ -15,8 +15,8 @@
 import unittest
 import numpy as np
 from pyscf import fci, gto
-from nest.deltascf import fr
-from nest.nttda import NTTDA, rks
+from nest.deltascf import fr, rks
+from nest.nttda import NTTDA
 from nest.nttda.nttda import _orbital_indices
 
 

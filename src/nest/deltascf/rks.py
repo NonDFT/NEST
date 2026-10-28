@@ -25,9 +25,8 @@ R = C_RKS,occ.T @ r_AO @ C_det,occ give
 Ref: JCP, 2021, 154, 144109.
 """
 
-import warnings
-
 import numpy as np
+from pyscf.lib import logger
 
 from nest.nttda.nttda import _orbital_indices, _dipole_integrals
 
@@ -193,6 +192,7 @@ def transition_properties(tdobj, ground, state=None, origin=None, gauge='length'
 
     The dipole origin defaults to the center of mass; an explicit ``origin``
     is in Bohr. sfX2C1e operators include picture change by default.
+    For neutral systems, the nuclear term makes total dipoles origin independent.
     States are not orthogonalized; the two gauges need not agree.
     """
     mf, mol = tdobj._scf, tdobj._scf.mol
@@ -258,8 +258,8 @@ def transition_properties(tdobj, ground, state=None, origin=None, gauge='length'
         result['dipole'] = dipole
         result['oscillator_strength'] = (2.0 / 3.0) * energy * np.einsum('nx,nx->n', dipole, dipole)
         if mol.charge != 0 and np.max(np.abs(overlap)) > 1e-8:
-            warnings.warn('Nonorthogonal RKS/NTTDA states in a charged system: '
-                          'length-gauge strengths depend on the chosen origin.', stacklevel=2)
+            logger.warn(tdobj, 'Nonorthogonal RKS/NTTDA states in a charged system: '
+                        'length-gauge strengths depend on the chosen origin.')
     else:
         if np.any(energy == 0):
             raise ValueError('Velocity-gauge oscillator strengths require nonzero transition energies')
