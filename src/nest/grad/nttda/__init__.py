@@ -69,7 +69,7 @@ def _aligned_amplitudes(reference, displaced):
 def _copy_td_settings(source, target):
     for name in (
             "deltaS", "nobeta", "nstates", "conv_tol", "lindep",
-            "max_cycle", "max_memory"):
+            "max_cycle", "max_memory", "frozen"):
         setattr(target, name, getattr(source, name))
     target.verbose = 0
     return target

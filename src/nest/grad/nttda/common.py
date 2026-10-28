@@ -113,9 +113,7 @@ def orbital_spaces(tdobj):
     occ = np.asarray(mf.mo_occ)
     if occ.ndim != 1:
         raise ValueError("NTTDA gradients require spatial ROKS orbitals")
-    closed = np.flatnonzero(occ == 2)
-    open_ = np.flatnonzero(occ == 1)
-    virtual = np.flatnonzero(occ == 0)
+    closed, open_, virtual = nttda_mod._orbital_indices(tdobj)
     coeff = np.asarray(mf.mo_coeff)
     return OrbitalSpaces(
         closed=closed,

@@ -686,11 +686,11 @@ def gen_vind_sc(td):
     def vind(zs):
         time0 = time1 = (logger.process_clock(), logger.perf_counter())
         zs = np.asarray(zs)  # (nstates, ndim)
-        zs_co = zs[:, slices['CO(1)']].reshape(-1, ncs, nos)
-        zs_cv = zs[:, slices['CV(1)']].reshape(-1, ncs, nvs)
-        zs_oo = zs[:, slices['OO(1)']].reshape(-1, 1)
-        zs_ov = zs[:, slices['OV(1)']].reshape(-1, nos, nvs)
-        zs_cv0 = zs[:, slices['CV(0)']].reshape(-1, ncs, nvs)
+        zs_co = zs[:, slices['CO(1)']].reshape(len(zs), ncs, nos)
+        zs_cv = zs[:, slices['CV(1)']].reshape(len(zs), ncs, nvs)
+        zs_oo = zs[:, slices['OO(1)']].reshape(len(zs), 1)
+        zs_ov = zs[:, slices['OV(1)']].reshape(len(zs), nos, nvs)
+        zs_cv0 = zs[:, slices['CV(0)']].reshape(len(zs), ncs, nvs)
         dms_co = lib.einsum('xov,pv,qo->xpq', zs_co, orbos, orbcs.conj())
         dms_cv = lib.einsum('xov,pv,qo->xpq', zs_cv, orbvs, orbcs.conj())
         dms_ov = lib.einsum('xov,pv,qo->xpq', zs_ov, orbvs, orbos.conj())
@@ -960,6 +960,10 @@ class NTTDA(TDBase):
     Noncollinear-Tensor TDA
     deltaS: -1 for Sf=Si-1, 0 for Sf=Si, 1 for Sf=Si+1
     nobeta: True for problemstic cases where there is no local beta electrons
+    frozen: number of lowest orbitals or a sequence of zero-based orbital
+        indices excluded from excitations. Open-shell orbitals must stay active.
+    xy: (X, 0) pairs in the active excitation space. Frozen closed/virtual
+        orbitals are omitted from X; the SCF orbitals remain complete.
     '''
 
     deltaS = getattr(__config__, 'NTTDA_delta_S', -1)
@@ -992,6 +996,21 @@ class NTTDA(TDBase):
             raise ValueError('deltaS must be -1, 0, or 1')
         TDBase.check_sanity(self)
         return self
+
+    def get_frozen_mask(self):
+        """Spatial-orbital mask; reference densities always use all orbitals."""
+        mo_occ = self._scf.mo_occ
+        mask = np.ones(mo_occ.size, dtype=bool)
+        if isinstance(self.frozen, (int, np.integer)):
+            # Slicing silently accepts negative counts and clips oversized ones.
+            if not 0 <= self.frozen <= mo_occ.size:
+                raise ValueError('frozen orbital count must be between 0 and the number of MOs')
+            mask[:self.frozen] = False
+        elif self.frozen is not None:
+            mask[list(self.frozen)] = False
+        if np.any((mo_occ == 1) & ~mask):
+            raise ValueError('NTTDA open-shell orbitals cannot be frozen')
+        return mask
 
     def init_guess(self, hdiag, nstates=None):
         if nstates is None:
@@ -1029,8 +1048,6 @@ class NTTDA(TDBase):
             ncs, nos = len(csidx), len(osidx)
             nocc = ncs + nos
             nvir = nos + len(vsidx)
-            nstates = min(nstates, hdiag.size - 1)
-            self.nstates = nstates
             open_diag = np.arange(nos)
 
             def project(zs):
@@ -1053,6 +1070,11 @@ class NTTDA(TDBase):
             csidx, _, vsidx = _orbital_indices(self)
             ncs = len(csidx)
             nvs = len(vsidx)
+
+        nstates = min(nstates, hdiag.size - (self.deltaS == -1))
+        if nstates < 1:
+            raise ValueError('No active NTTDA excitations remain for the requested spin channel')
+        self.nstates = nstates
 
         x0sym = None
         if x0 is None:
@@ -1093,7 +1115,7 @@ class NTTDA(TDBase):
 
     def get_ab(self):
         from nest.nttda.get_ab import get_ab
-        return get_ab(self._scf, deltaS=self.deltaS, nobeta=self.nobeta)
+        return get_ab(self._scf, deltaS=self.deltaS, nobeta=self.nobeta, frozen=self.frozen)
 
     def SOC(self, *others, soctype='SOMF', include_reference=False):
         """Couple converged NTTDA states through state-interaction SOC."""
@@ -1108,6 +1130,7 @@ class NTTDA(TDBase):
 def _unpack_amplitudes(tdobj, state, nc, no, nv):
     """Return CO[i,u], CV[i,a], OO[u,t], OV[u,a], CV0[i,a].
 
+    nc and nv count active closed/virtual orbitals; no includes all open orbitals.
     Formula labels are CO(ui), CV(ai), OO(tu), OV(au), CV0(ai).
     For deltaS=0 OO is a scalar; for deltaS=+1 only CV is present.
     """
@@ -1221,7 +1244,46 @@ def transition_dm(tdobj, bra, ket):
     return gamma
 
 
-def transition_dipole(tdobj, ref=1, state=None):
+def _dipole_integrals(mf, gauge, picture_change=True):
+    """AO r or i*v; sfX2C1e uses picture-changed r and Dirac c*alpha."""
+    mol = mf.mol
+    x2c = getattr(mf, 'with_x2c', None) or None  # PySCF also uses False to disable X2C.
+    if x2c is not None:
+        from pyscf.x2c.sfx2c1e import SpinFreeX2CHelper
+        if not isinstance(x2c, SpinFreeX2CHelper):
+            raise NotImplementedError('Only spin-free X2C1e transition operators are supported')
+        if x2c.basis is not None:
+            raise NotImplementedError('An auxiliary X2C basis is not supported for transition operators')
+    if gauge == 'length':
+        if x2c is not None and picture_change:
+            # Same spin-free r picture change as PySCF's dip_moment:
+            # LL=r; SS=(sigma.p) r (sigma.p)/(4c^2), spin trace only.
+            xmol = x2c.get_xmol()[0]
+            prp = xmol.intor_symmetric('int1e_sprsp').reshape(3, 4, xmol.nao, xmol.nao)[:, 3]
+            return x2c.picture_change(('int1e_r', prp / (4 * lib.param.LIGHT_SPEED**2)))
+        return mol.intor_symmetric('int1e_r', comp=3)
+    if gauge != 'velocity':
+        raise ValueError("gauge must be 'length' or 'velocity'")
+    if mol.ecp or mol.pseudo:
+        raise NotImplementedError('Velocity-gauge ECP/pseudopotential commutator corrections are not implemented')
+    if x2c is not None and picture_change:
+        # Velocity is c*alpha, NOT canonical p. In a restricted-kinetic-
+        # balance basis its spin-free LS/SL blocks are both p/2. Pass the
+        # physical Hermitian (pure imaginary) block: picture_change supplies
+        # its conjugate transpose in SL. A real antisymmetric block here
+        # would have the wrong sign and an incorrect nonrelativistic limit.
+        # Dirac operator: https://www.diracprogram.org/doc/release-14/tutorials/dft/tddft.html
+        xmol = x2c.get_xmol()[0]
+        ls = 0.5j * xmol.intor('int1e_ipovlp', comp=3, hermi=0)
+        velocity = x2c.picture_change(odd_operator=ls)
+        return (1j * velocity).real
+    # int1e_ipovlp differentiates the BRA: <nabla mu|nu> = -<mu|nabla nu>.
+    # Return <mu|nabla|nu> = i<mu|p|nu>, matching PySCF's velocity-dipole
+    # sign. The physical momentum is -i times this real antisymmetric matrix.
+    return -mol.intor('int1e_ipovlp', comp=3, hermi=0)
+
+
+def transition_dipole(tdobj, ref=1, state=None, picture_change=True):
     """Return <ref|r|state> in length gauge, shape (n_targets, 3).
 
     Targets exclude ref. With state=None, n_targets = len(tdobj.xy) - 1;
@@ -1231,7 +1293,28 @@ def transition_dipole(tdobj, ref=1, state=None):
         tdobj: NTTDA object with computed roots.
         ref: 1-based index of reference root.
         state: 1-based index or sequence of indices of target roots. None for all roots except ref.
+        picture_change: Apply sfX2C1e operator picture change when present.
+            False uses bare nonrelativistic integrals for comparison only.
     """
+    return _transition_moment(tdobj, ref, state, 'length', picture_change)
+
+
+def transition_velocity_dipole(tdobj, ref=1, state=None, picture_change=True):
+    """Return i<ref|sum v|state>, shape (n_targets, 3), in atomic units.
+
+    The omitted factor -i recovers the velocity matrix element. This is
+    PySCF's velocity-dipole sign convention; for real states the result is
+    real and changes sign under bra/ket exchange. Divide by the transition
+    energy to compare its magnitude with the length dipole. Uses the same
+    1-based indices as transition_dipole. No nuclear term is included for
+    fixed nuclei. For all-electron nonrelativistic models v=p; sfX2C1e
+    instead picture-changes Dirac c*alpha. picture_change=False uses bare
+    nonrelativistic p integrals for comparison, not the X2C velocity.
+    """
+    return _transition_moment(tdobj, ref, state, 'velocity', picture_change)
+
+
+def _transition_moment(tdobj, ref, state, gauge, picture_change):
     if not 1 <= ref <= len(tdobj.xy):
         raise ValueError('ref must index a computed root (1-based)')
     if np.isscalar(state) and state == ref:
@@ -1243,7 +1326,7 @@ def transition_dipole(tdobj, ref=1, state=None):
     states = states[states != ref] - 1
     mf = tdobj._scf
     coeff = np.asarray(mf.mo_coeff)
-    dip_ao = mf.mol.intor_symmetric('int1e_r', comp=3)
+    dip_ao = _dipole_integrals(mf, gauge, picture_change=picture_change)
     dip_mo = lib.einsum('up,xuv,vq->xpq', coeff.conj(), dip_ao, coeff)
     dtype = np.result_type(dip_mo, tdobj.xy[ref - 1][0], *[tdobj.xy[i][0] for i in states])
     pol = np.empty((len(states), 3), dtype=dtype)
@@ -1253,12 +1336,16 @@ def transition_dipole(tdobj, ref=1, state=None):
     return pol
 
 
-def oscillator_strength(tdobj, ref=1, state=None):
-    """Length-gauge oscillator strengths between computed NTTDA roots.
+def oscillator_strength(tdobj, ref=1, state=None, gauge='length', picture_change=True):
+    """Length- or velocity-gauge strengths between computed NTTDA roots.
 
     Uses the same 1-based indices as transition_dipole. Downward transitions
     retain negative energy differences. A scalar state returns a scalar;
-    a sequence or None returns an array.
+    a sequence or None returns an array. Length (the default) uses
+    (2/3)*dE*|r|^2; velocity uses (2/3)*|v|^2/dE and requires nonzero dE.
+    sfX2C1e operators include picture change by default; False uses bare
+    nonrelativistic operators for a diagnostic comparison.
+    Gauge agreement is not guaranteed for the approximate NTTDA states.
     """
     if not 1 <= ref <= len(tdobj.xy):
         raise ValueError('ref must index a computed root (1-based)')
@@ -1269,9 +1356,18 @@ def oscillator_strength(tdobj, ref=1, state=None):
     else:
         states = np.atleast_1d(state).astype(int)
     states = states[states != ref] - 1
-    dip = transition_dipole(tdobj, ref, states + 1)
     de = np.asarray(tdobj.e)[states] - tdobj.e[ref - 1]
-    strength = (2. / 3.) * de * np.einsum('nx,nx->n', dip.conj(), dip).real
+    if gauge == 'length':
+        dip = transition_dipole(tdobj, ref, states + 1, picture_change=picture_change)
+        factor = de
+    elif gauge == 'velocity':
+        if np.any(de == 0):
+            raise ValueError('Velocity-gauge oscillator strengths require nonzero transition energies')
+        dip = transition_velocity_dipole(tdobj, ref, states + 1, picture_change=picture_change)
+        factor = 1 / de
+    else:
+        raise ValueError("gauge must be 'length' or 'velocity'")
+    strength = (2. / 3.) * factor * np.einsum('nx,nx->n', dip.conj(), dip).real
     if np.isscalar(state):
         return strength[0]
     else:
@@ -1279,6 +1375,7 @@ def oscillator_strength(tdobj, ref=1, state=None):
 
 
 NTTDA.transition_dipole = transition_dipole
+NTTDA.transition_velocity_dipole = transition_velocity_dipole
 NTTDA.oscillator_strength = oscillator_strength
 
 
@@ -1320,9 +1417,10 @@ def _sc_vector_slices(nc, no, nv):
 
 def _orbital_indices(tdobj):
     mo_occ = np.asarray(tdobj._scf.mo_occ)
-    csidx = np.where(mo_occ == 2)[0]
+    mask = tdobj.get_frozen_mask()
+    csidx = np.where((mo_occ == 2) & mask)[0]
     osidx = np.where(mo_occ == 1)[0]
-    vsidx = np.where(mo_occ == 0)[0]
+    vsidx = np.where((mo_occ == 0) & mask)[0]
     return csidx, osidx, vsidx
 
 

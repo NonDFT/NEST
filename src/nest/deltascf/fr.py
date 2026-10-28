@@ -75,6 +75,8 @@ class FR(lib.StreamObject):
     Requires spin=2 and real S-orthonormal input orbitals. With symmetry,
     each orbital must have a definite irrep in an Abelian point group;
     multiple orbitals may share an irrep. Dooh, Coov and SO3 are unsupported.
+    A spin-free X2C1e reference is supported: apply mf.sfx2c1e() before FR.
+    Its Hamiltonian is retained in both the freeze and release stages.
 
     Attributes:
         freeze_tol : float

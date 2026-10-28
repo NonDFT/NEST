@@ -91,6 +91,38 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(abs(td.oscillator_strength() - ref_f).max(), 0, delta=1e-5)
 
 
+    def test_frozen_orbitals_oscillator_strength(self):
+        mf = self.mol.ROKS(xc='SVWN').run()
+        self.assertTrue(mf.converged)
+        # Pure core freezing, then core plus the last virtual orbital.
+        references = (
+            (2, {
+                -1: ([-0.134831604188, 0.085632546917, -0.153508111461], 0.007680813807),
+                0: ([1.540800197229, -0.946819349780, 0.037110894550], 0.067491776371),
+                1: ([-1.491359659990, 0.935150207487, 0.205502639930], 0.109987901440),
+            }),
+            ([0, 1, -1], {
+                -1: ([-0.134578869750, 0.085519461348, -0.156728216036], 0.007824907757),
+                0: ([1.541428916877, -0.946666781738, 0.037001028322], 0.067479224058),
+                1: ([1.491143945230, -0.934583572680, -0.205520471385], 0.109958440239),
+            }),
+        )
+        for frozen, refs_by_delta_s in references:
+            for delta_s, (ref_dip, ref_f) in refs_by_delta_s.items():
+                with self.subTest(frozen=frozen, deltaS=delta_s):
+                    td = mf.NTTDA(frozen=frozen).set(
+                        deltaS=delta_s, nstates=2,
+                    ).run()
+                    self.assertTrue(np.all(td.converged))
+                    dip = td.transition_dipole()[0]
+                    # Compare outer products to allow an overall state phase.
+                    np.testing.assert_allclose(
+                        np.outer(dip.conj(), dip), np.outer(ref_dip, ref_dip),
+                        atol=5e-5, rtol=0,
+                    )
+                    self.assertAlmostEqual(td.oscillator_strength()[0], ref_f, delta=1e-5)
+
+
 if __name__ == '__main__':
     print('Full tests for NTTDA transition dipoles and oscillator strengths')
     unittest.main()
