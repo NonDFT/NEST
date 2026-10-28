@@ -46,15 +46,13 @@ class KnownValues(unittest.TestCase):
             mf = self.mol.ROKS(xc=xc).density_fit(auxbasis='weigend').run(conv_tol=1e-11)
             self.assertTrue(mf.converged)
             td = mf.NTTDA()
-            for nobeta in (False, True):
-                td.nobeta = nobeta
-                for delta_s, generator in ((-1, td.gen_vind_sfd), (0, td.gen_vind_sc), (1, td.gen_vind_sfu)):
-                    td.deltaS = delta_s
-                    vind, hdiag = generator()
-                    a = td.get_ab()
-                    self.assertAlmostEqual(abs(a - a.T).max(), 0, delta=1e-11)
-                    x = np.random.default_rng(12).standard_normal((10, hdiag.size))
-                    self.assertAlmostEqual(abs(vind(x) - (a @ x.T).T).max(), 0, delta=1e-11)
+            for delta_s, generator in ((-1, td.gen_vind_sfd), (0, td.gen_vind_sc), (1, td.gen_vind_sfu)):
+                td.deltaS = delta_s
+                vind, hdiag = generator()
+                a = td.get_ab()
+                self.assertAlmostEqual(abs(a - a.T).max(), 0, delta=1e-11)
+                x = np.random.default_rng(12).standard_normal((10, hdiag.size))
+                self.assertAlmostEqual(abs(vind(x) - (a @ x.T).T).max(), 0, delta=1e-11)
 
         # Mixing fitted J with exact K cannot be represented by one K^Ref tensor.
         mf.only_dfj = True
@@ -65,29 +63,28 @@ class KnownValues(unittest.TestCase):
         for xc in ('HF', 'SVWN', 'PBE', 'M062X', 'CAM-B3LYP'):
             mf = self.mol.ROKS(xc=xc).run(conv_tol=1e-11)
             self.assertTrue(mf.converged)
-            for nobeta in (False, True):
-                for delta_s in (-1, 0, 1):
-                    td = mf.NTTDA().set(deltaS=delta_s, nobeta=nobeta)
-                    if delta_s == -1:
-                        vind, hdiag = td.gen_vind_sfd()
-                    elif delta_s == 0:
-                        vind, hdiag = td.gen_vind_sc()
-                    else:
-                        vind, hdiag = td.gen_vind_sfu()
+            for delta_s in (-1, 0, 1):
+                td = mf.NTTDA().set(deltaS=delta_s)
+                if delta_s == -1:
+                    vind, hdiag = td.gen_vind_sfd()
+                elif delta_s == 0:
+                    vind, hdiag = td.gen_vind_sc()
+                else:
+                    vind, hdiag = td.gen_vind_sfu()
 
-                    a = td.get_ab()
-                    self.assertEqual(a.shape, (hdiag.size, hdiag.size))
-                    self.assertAlmostEqual(abs(a - a.T).max(), 0, delta=1e-11)
-                    x = np.random.default_rng(12).standard_normal((10, hdiag.size))
-                    self.assertAlmostEqual(abs(vind(x) - (a @ x.T).T).max(), 0, delta=1e-11)
+                a = td.get_ab()
+                self.assertEqual(a.shape, (hdiag.size, hdiag.size))
+                self.assertAlmostEqual(abs(a - a.T).max(), 0, delta=1e-11)
+                x = np.random.default_rng(12).standard_normal((10, hdiag.size))
+                self.assertAlmostEqual(abs(vind(x) - (a @ x.T).T).max(), 0, delta=1e-11)
 
-                    if delta_s == -1:
-                        nc = np.count_nonzero(mf.mo_occ == 2)
-                        no = np.count_nonzero(mf.mo_occ == 1)
-                        nv = np.count_nonzero(mf.mo_occ == 0)
-                        q = np.zeros((nc + no, no + nv))
-                        q[nc:, :no] = np.eye(no) / np.sqrt(no)
-                        self.assertAlmostEqual(np.linalg.norm(a @ q.ravel()), 0, delta=1e-11)
+                if delta_s == -1:
+                    nc = np.count_nonzero(mf.mo_occ == 2)
+                    no = np.count_nonzero(mf.mo_occ == 1)
+                    nv = np.count_nonzero(mf.mo_occ == 0)
+                    q = np.zeros((nc + no, no + nv))
+                    q[nc:, :no] = np.eye(no) / np.sqrt(no)
+                    self.assertAlmostEqual(np.linalg.norm(a @ q.ravel()), 0, delta=1e-11)
 
 
 if __name__ == '__main__':

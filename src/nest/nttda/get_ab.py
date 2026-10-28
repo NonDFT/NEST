@@ -18,9 +18,10 @@
 import numpy as np
 from pyscf import ao2mo, dft, lib
 from pyscf.lib import logger
+from nest.nttda.nttda import NTTDA
 
 
-def get_ab(mf, deltaS=-1, nobeta=False):
+def get_ab(mf, deltaS=-1, nobeta=False, frozen=None):
     r"""Return the dense A matrix for a ROKS reference (there is no B matrix).
 
     i,j denote closed-shell orbitals; a,b virtual orbitals; u,v,t,w open-shell
@@ -38,6 +39,8 @@ def get_ab(mf, deltaS=-1, nobeta=False):
     This dense implementation stores full four-index MO tensors and is
     intended for small systems. With density fitting, both J and K must use
     the same fitted integrals (only_dfj=True is not supported).
+    ``frozen`` excludes closed/virtual orbitals from the matrix, while the
+    reference density and Fock operators retain all orbitals.
     """
     if not isinstance(mf, (dft.roks.ROKS, dft.rks_symm.SymAdaptedROKS)):
         raise TypeError('NTTDA get_ab requires a ROKS reference')
@@ -48,9 +51,10 @@ def get_ab(mf, deltaS=-1, nobeta=False):
         raise NotImplementedError('NTTDA get_ab does not support only_dfj=True')
 
     mol = mf.mol
-    csidx = np.where(mf.mo_occ == 2)[0]
+    mo_mask = NTTDA(mf, frozen=frozen).get_frozen_mask()
+    csidx = np.where((mf.mo_occ == 2) & mo_mask)[0]
     osidx = np.where(mf.mo_occ == 1)[0]
-    vsidx = np.where(mf.mo_occ == 0)[0]
+    vsidx = np.where((mf.mo_occ == 0) & mo_mask)[0]
     nc, no, nv = len(csidx), len(osidx), len(vsidx)
     s = no * 0.5
     if deltaS == -1:
@@ -102,7 +106,7 @@ def get_ab(mf, deltaS=-1, nobeta=False):
         max_memory = max(2000, mf.max_memory * .8 - lib.current_memory()[0])
         ao_deriv = 0 if xctype == 'LDA' else 1
         for ao, mask, weight, coords in ni.block_loop(mol, mf.grids, mol.nao_nr(), ao_deriv, max_memory):
-            rho = ni.eval_rho2(mol, ao, mo, mf.mo_occ[order], mask, xctype, with_lapl=False) * .5
+            rho = ni.eval_rho2(mol, ao, mf.mo_coeff, mf.mo_occ, mask, xctype, with_lapl=False) * .5
             fxc = ni.eval_xc_eff(mf.xc, (rho, rho), deriv=2, xctype=xctype, spin=1)[2]
             fxc_ref = .5 * (fxc[0, :, 0] - fxc[0, :, 1] - fxc[1, :, 0] + fxc[1, :, 1])
             if xctype == 'LDA':

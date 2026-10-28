@@ -179,6 +179,59 @@ class KnownValues(unittest.TestCase):
         )
         np.testing.assert_array_equal(driver.get_block(3, 1), np.zeros((5, 1)))
 
+    def test_frozen_orbitals_soc(self):
+        mf = self.mol.ROKS(xc='SVWN').run()
+        self.assertTrue(mf.converged)
+        # Different active spaces must map to the same MO indices in SOC.
+        # Indices 0 and 1 are O 1s orbitals; -1 is the last virtual orbital.
+        # SOC block comparisons below use an absolute tolerance of 5e-4 cm^-1.
+        td0 = mf.NTTDA(frozen=[1, -1]).set(deltaS=0, nstates=1).run()
+        tdm1 = mf.NTTDA(frozen=2).set(deltaS=-1, nstates=2).run()
+        tdp1 = mf.NTTDA(frozen=[0, 1, -1]).set(deltaS=1, nstates=2).run()
+        self.assertTrue(np.all(td0.converged))
+        self.assertTrue(np.all(tdm1.converged))
+        self.assertTrue(np.all(tdp1.converged))
+        driver = td0.SOC(tdm1, tdp1).run()
+
+        # Checked against the same states expressed in the full MO space with frozen amplitudes zero.
+        self.assertEqual(driver.h_soc.shape, (15, 15))
+        np.testing.assert_allclose(driver.h_soc, driver.h_soc.conj().T, atol=1e-12)
+        np.testing.assert_allclose(
+            (driver.e - driver.e.min()).real * HARTREE2WAVENUMBER,
+            [
+                0.0, 46164.68856840081, 46164.69181457587,
+                46164.6955945347, 51523.198885706006,
+                103996.00078162245, 103996.00113195438, 103996.00975253736,
+                103996.01364846418, 103996.01557368443,
+                115527.50910087393, 115527.51055398698, 115527.51500579911,
+                115527.52231741096, 115527.52281725402,
+            ],
+            atol=1e-4, rtol=0,
+        )
+        assert_allclose_up_to_sign(
+            self,
+            driver.get_block(0, 1) * HARTREE2WAVENUMBER,
+            np.array([
+                [-0.599093134478 + 6.502456992965j],
+                [14.12343230699j],
+                [-0.599093134478 - 6.502456992965j],
+            ]),
+            5e-4,
+        )
+        assert_allclose_up_to_sign(
+            self,
+            driver.get_block(3, 0) * HARTREE2WAVENUMBER,
+            np.array([
+                [4.287950791358 + 0.861718813093j, 0.0, 0.0],
+                [22.067008877245j, 3.032039081964 + 0.609327216214j, 0.0],
+                [1.750548580165 - 0.351795232306j, 25.480787030975j,
+                 1.750548580165 + 0.351795232306j],
+                [0.0, 3.032039081964 - 0.609327216214j, 22.067008877245j],
+                [0.0, 0.0, 4.287950791358 - 0.861718813093j],
+            ]),
+            5e-4,
+        )
+
 
 if __name__ == '__main__':
     print('Full SOC tests for noncollinear tensor TDA')

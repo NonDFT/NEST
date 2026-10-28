@@ -209,6 +209,8 @@ class SGM(lib.StreamObject):
     The returned object also inherits the input ROHF/ROKS class. Use
     mf.SGM().set(...).run(mo_coeff, mo_occ), or SGM(mf).kernel(...).
     NLC response is omitted. Only real orbital rotations are supported.
+    A spin-free X2C1e Hamiltonian is supported: apply mf.sfx2c1e() before
+    SGM. undo_sgm() retains the X2C decoration for subsequent NTTDA.
     '''
 
     __name_mixin__ = 'SGM'

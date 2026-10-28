@@ -13,9 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Length-gauge transition dipoles and oscillator strengths within each spin sector."""
+"""Compare length- and velocity-gauge strengths within each NTTDA spin sector."""
 
 from pyscf import gto
+from pyscf.data import nist
 from nest import nttda  # Registers NTTDA on ROKS.
 
 mol = gto.M(
@@ -35,12 +36,9 @@ for deltaS in (-1, 0, 1):
     print(f'Final spin S = {mol.spin / 2 + deltaS}')
     # Indices are 1-based computed roots in this spin sector.
     # ref=1 is its lowest computed root, not the ROKS reference state.
-    print('Transition dipoles (a.u.), 1 -> [2, 3]:')
-    print(td.transition_dipole(ref=1, state=[2, 3]))
-    print('Oscillator strengths, 1 -> all other computed roots:')
-    print(td.oscillator_strength(ref=1))
-    print('Oscillator strength, 1 -> 2 (scalar):')
-    print(td.oscillator_strength(ref=1, state=2))
-    # Downward transitions retain the negative energy difference.
-    print('Oscillator strength, 2 -> 1:')
-    print(td.oscillator_strength(ref=2, state=1))
+    energy = (td.e[1:] - td.e[0]) * nist.HARTREE2EV
+    length = td.oscillator_strength(ref=1)
+    velocity = td.oscillator_strength(ref=1, gauge='velocity')
+    print('root   E/eV       f_length       f_velocity')
+    for state, (e, fl, fv) in enumerate(zip(energy, length, velocity), start=2):
+        print(f'{state:3d}  {e:9.4f}  {fl:.6e}  {fv:.6e}')

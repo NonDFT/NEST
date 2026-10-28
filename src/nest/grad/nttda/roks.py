@@ -100,19 +100,34 @@ def finish_gradient(
     )
 
 
+def _same_occupation_pairs(tdobj, compact=True):
+    """Canonical rotations needed across active/frozen orbital boundaries."""
+    occ = np.asarray(tdobj._scf.mo_occ)
+    active = tdobj.get_frozen_mask()
+    pairs = []
+    # Frozen excitation spaces are not invariant under rotations mixing
+    # active and frozen orbitals of equal occupation. Differentiate their
+    # canonical F0 off-diagonal constraints as well as the SCF stationarity.
+    for occupation, name in ((2, "cc"), (1, "oo"), (0, "vv")):
+        indices = np.flatnonzero(occ == occupation)
+        if compact:
+            kept = indices[active[indices]]
+            frozen = indices[~active[indices]]
+            pairs.extend((max(p, q), min(p, q), name) for p in kept for q in frozen)
+        else:
+            for p_local in range(1, len(indices)):
+                for q_local in range(p_local):
+                    pairs.append((indices[p_local], indices[q_local], name))
+    return tuple(pairs)
+
+
 def canonical_pairs(tdobj, compact=True):
     """Canonical spatial-orbital rotations and their ROKS residual type."""
     occ = np.asarray(tdobj._scf.mo_occ)
     closed = np.flatnonzero(occ == 2)
     open_ = np.flatnonzero(occ == 1)
     virtual = np.flatnonzero(occ == 0)
-    pairs = []
-    if not compact:
-        for indices, name in (
-                (closed, "cc"), (open_, "oo"), (virtual, "vv")):
-            for p_local in range(1, len(indices)):
-                for q_local in range(p_local):
-                    pairs.append((indices[p_local], indices[q_local], name))
+    pairs = list(_same_occupation_pairs(tdobj, compact))
     pairs.extend((o, c, "co") for o in open_ for c in closed)
     pairs.extend((v, c, "cv") for v in virtual for c in closed)
     pairs.extend((v, o, "ov") for v in virtual for o in open_)
