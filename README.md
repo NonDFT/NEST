@@ -87,7 +87,7 @@ Benchmark calculations and validation.
 | Noncollinear DFT | Zhichen Pu, Qiming Sun |
 | Noncollinear TDDFT | Hao Li, Qiming Sun |
 | Noncollinear SF-TDA / SF-TDDFT | Hao Li, Tai Wang |
-| Analytic Nuclear Gradients | Hao Li, Tai Wang |
+| Analytic Nuclear Gradients | Hao Li, Tai Wang, Yu Jing |
 | Analytic Nonadiabatic Derivative Couplings (NADC) | Yu Jing, Tai Wang |
 | Oscillator Strengths | Tai Wang |
 | Noncollinear Tensor TDA (NT-TDA) | Tai Wang, Wenxian Qin |
