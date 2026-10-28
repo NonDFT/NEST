@@ -78,6 +78,9 @@ class SecondOrderAverageOccupationROKS(newton_ah._SecondOrderROHF):
         mf._scf.with_x2c = mf.with_x2c
         return mf
 
+    x2c1e = sfx2c1e
+    x2c = x2c1e
+
     def gen_g_hop(self, mo_coeff, mo_occ, fock_ao=None, h1e=None, with_symmetry=True):
         # Retain the shared rotation's oo/vv terms and gradient transport,
         # which PySCF's separate-spin ROHF Hessian omits away from convergence.
