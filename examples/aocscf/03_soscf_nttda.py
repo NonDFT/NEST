@@ -24,8 +24,6 @@ mol = gto.M(
 
 # Newton accepts the usual default SCF guess.
 mf = mol.ROKS(xc='B3LYP').average_occ()
-mf.conv_tol = 1e-10
-mf.conv_tol_grad = 1e-6
 mf = mf.newton().run()
 print(f'Newton converged: {mf.converged}')
 print(f'Average-occupation energy: {mf.e_avg_occ:.12f} Ha')

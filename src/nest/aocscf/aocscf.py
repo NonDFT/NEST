@@ -69,6 +69,15 @@ def gen_response(mf, mo_coeff=None, mo_occ=None, with_j=True, hermi=0, max_memor
 
 
 class SecondOrderAverageOccupationROKS(newton_ah._SecondOrderROHF):
+    def sfx2c1e(self):
+        from pyscf.x2c import sfx2c1e
+
+        mf = sfx2c1e.sfx2c1e(self)
+        # Newton evaluates the energy with _scf, and the Hessian with self.
+        mf._scf = self._scf.sfx2c1e()
+        mf._scf.with_x2c = mf.with_x2c
+        return mf
+
     def gen_g_hop(self, mo_coeff, mo_occ, fock_ao=None, h1e=None, with_symmetry=True):
         # Retain the shared rotation's oo/vv terms and gradient transport,
         # which PySCF's separate-spin ROHF Hessian omits away from convergence.
@@ -89,9 +98,16 @@ def _high_spin_energy_and_summary(mf):
     """Evaluate high-spin energy with an independent energy summary."""
     if mf.mo_coeff is None or mf.mo_occ is None:
         raise RuntimeError('Run SCF before evaluating the high-spin energy.')
-    # A view bypasses the spin-averaged get_veff while retaining the original
-    # object's XC integrator, grids, and other calculation settings.
-    mf_hs = lib.view(mf, dft.roks.ROKS)
+    # Remove the solver and replace only AOCSCF, keeping X2C/DF and symmetry.
+    mf_hs = mf.remove_soscf()
+    if hasattr(mf_hs, 'undo_sgm'):
+        mf_hs = mf_hs.undo_sgm()
+    if isinstance(mf_hs, SymAdaptedAverageOccupationROKS):
+        cls = lib.replace_class(mf_hs.__class__, SymAdaptedAverageOccupationROKS,
+                                dft.rks_symm.SymAdaptedROKS)
+    else:
+        cls = lib.replace_class(mf_hs.__class__, AverageOccupationROKS, dft.roks.ROKS)
+    mf_hs = lib.view(mf_hs, cls)
     mf_hs.scf_summary = mf.scf_summary.copy()
     dm_hs = mf_hs.make_rdm1(mf.mo_coeff, mf.mo_occ)
     veff_hs = mf_hs.get_veff(mf.mol, dm_hs)
@@ -170,14 +186,23 @@ class SymAdaptedAverageOccupationROKS(dft.rks_symm.SymAdaptedROKS):
 
 
 def average_occ(mf):
-    """Return an average-occupation SCF object from a plain PySCF ROKS."""
-    if type(mf) is dft.roks.ROKS:
-        cls = AverageOccupationROKS
-    elif type(mf) is dft.rks_symm.SymAdaptedROKS:
-        cls = SymAdaptedAverageOccupationROKS
+    """Replace the ROKS reference while retaining its X2C/DF/SCF wrappers."""
+    if isinstance(mf, (AverageOccupationROKS, SymAdaptedAverageOccupationROKS)):
+        return mf
+    if isinstance(mf, dft.rks_symm.SymAdaptedROKS):
+        cls = lib.replace_class(mf.__class__, dft.rks_symm.SymAdaptedROKS,
+                                SymAdaptedAverageOccupationROKS)
+    elif isinstance(mf, dft.roks.ROKS):
+        cls = lib.replace_class(mf.__class__, dft.roks.ROKS, AverageOccupationROKS)
     else:
-        raise TypeError('average_occ() requires a plain ROKS or SymAdaptedROKS object')
+        raise TypeError('average_occ() requires a ROKS or SymAdaptedROKS object')
+    if isinstance(mf, newton_ah._CIAH_SOSCF):
+        cls = lib.replace_class(cls, newton_ah._SecondOrderROHF, SecondOrderAverageOccupationROKS)
     averaged = lib.view(mf, cls)
+    if isinstance(mf, newton_ah._CIAH_SOSCF):
+        averaged._scf = average_occ(mf._scf)
+        if getattr(mf, 'with_x2c', None) is not None:
+            averaged = averaged.sfx2c1e()
     averaged.scf_summary = mf.scf_summary.copy()
     averaged.converged = False
     averaged.e_tot = None

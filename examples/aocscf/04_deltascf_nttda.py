@@ -32,8 +32,6 @@ triplet.spin = 2
 
 # FR freezes the two SOMOs, then releases all orbitals with IMOM.
 mf = triplet.ROKS(xc='B3LYP').average_occ()
-mf.conv_tol = 1e-10
-mf.conv_tol_grad = 1e-6
 mf_fr = mf.FR().run(ground.mo_coeff, occupations)
 print(f'FR converged: {mf_fr.converged}')
 print(f'Average-occupation energy: {mf_fr.e_avg_occ:.12f} Ha')
@@ -47,8 +45,6 @@ print(f'FR + NTTDA total energies (Ha): {td_fr.e_tot}')
 
 # SGM minimizes the squared orbital gradient with fixed occupations.
 mf = triplet.ROKS(xc='B3LYP').average_occ()
-mf.conv_tol = 1e-10
-mf.conv_tol_grad = 1e-6
 mf_sgm = mf.SGM().run(ground.mo_coeff, occupations)
 print(f'SGM converged: {mf_sgm.converged}')
 print(f'Average-occupation energy: {mf_sgm.e_avg_occ:.12f} Ha')

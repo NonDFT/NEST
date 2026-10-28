@@ -94,3 +94,36 @@ class KnownValues(unittest.TestCase):
         self.assertTrue(mf.converged)
         self.assertAlmostEqual(mf.e_avg_occ, -76.02438483647123, delta=1e-7)
         self.assertAlmostEqual(mf.e_tot, -76.11623061296555, delta=1e-6)
+
+    def test_sfx2c1e_aocscf(self):
+        reference = self.mol.ROKS(xc='B3LYP').sfx2c1e()
+        reference.grids.level = 0
+        mf = reference.average_occ().run()
+
+        self.assertTrue(mf.converged)
+        self.assertIs(mf.with_x2c, reference.with_x2c)
+        self.assertAlmostEqual(mf.e_tot, reference.energy_tot(dm=mf.make_rdm1()), delta=1e-9)
+        self.assertAlmostEqual(mf.e_avg_occ, mf.energy_tot(), delta=1e-9)
+
+    def test_aocscf_df_sfx2c1e(self):
+        reference = self.mol.ROKS(xc='B3LYP').density_fit().sfx2c1e()
+        reference.grids.level = 0
+        mf = self.mol.ROKS(xc='B3LYP').average_occ().density_fit().sfx2c1e()
+        mf.grids = reference.grids
+        mf.run()
+
+        self.assertTrue(mf.converged)
+        self.assertAlmostEqual(mf.e_tot, reference.energy_tot(dm=mf.make_rdm1()), delta=1e-9)
+        self.assertAlmostEqual(mf.e_avg_occ, mf.energy_tot(), delta=1e-9)
+
+    def test_newton_aocscf_sfx2c1e(self):
+        reference = self.mol.ROKS(xc='B3LYP').sfx2c1e()
+        reference.grids.level = 0
+        mf = self.mol.ROKS(xc='B3LYP').newton().average_occ().sfx2c1e()
+        mf.grids = mf._scf.grids = reference.grids
+        mf.run()
+
+        self.assertTrue(mf.converged)
+        self.assertIs(mf.with_x2c, mf._scf.with_x2c)
+        self.assertAlmostEqual(mf.e_tot, reference.energy_tot(dm=mf.make_rdm1()), delta=1e-9)
+        self.assertAlmostEqual(mf.e_avg_occ, mf.remove_soscf().energy_tot(), delta=1e-9)
