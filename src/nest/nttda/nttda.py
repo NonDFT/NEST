@@ -18,8 +18,6 @@
 # Author: Tai Wang <wtpeter@pku.edu.cn>
 #
 
-from contextlib import nullcontext
-
 import numpy as np
 from pyscf import lib
 from pyscf import dft
@@ -1246,7 +1244,7 @@ def transition_dm(tdobj, bra, ket):
     return gamma
 
 
-def _dipole_integrals(mf, gauge, origin=None, picture_change=True):
+def _dipole_integrals(mf, gauge, picture_change=True):
     """AO r or i*v; sfX2C1e uses picture-changed r and Dirac c*alpha."""
     mol = mf.mol
     x2c = getattr(mf, 'with_x2c', None) or None  # PySCF also uses False to disable X2C.
@@ -1257,14 +1255,13 @@ def _dipole_integrals(mf, gauge, origin=None, picture_change=True):
         if x2c.basis is not None:
             raise NotImplementedError('An auxiliary X2C basis is not supported for transition operators')
     if gauge == 'length':
-        with mol.with_common_orig(origin) if origin is not None else nullcontext():
-            if x2c is not None and picture_change:
-                # Same spin-free r picture change as PySCF's dip_moment:
-                # LL=r; SS=(sigma.p) r (sigma.p)/(4c^2), spin trace only.
-                xmol = x2c.get_xmol()[0]
-                prp = xmol.intor_symmetric('int1e_sprsp').reshape(3, 4, xmol.nao, xmol.nao)[:, 3]
-                return x2c.picture_change(('int1e_r', prp / (4 * lib.param.LIGHT_SPEED**2)))
-            return mol.intor_symmetric('int1e_r', comp=3)
+        if x2c is not None and picture_change:
+            # Same spin-free r picture change as PySCF's dip_moment:
+            # LL=r; SS=(sigma.p) r (sigma.p)/(4c^2), spin trace only.
+            xmol = x2c.get_xmol()[0]
+            prp = xmol.intor_symmetric('int1e_sprsp').reshape(3, 4, xmol.nao, xmol.nao)[:, 3]
+            return x2c.picture_change(('int1e_r', prp / (4 * lib.param.LIGHT_SPEED**2)))
+        return mol.intor_symmetric('int1e_r', comp=3)
     if gauge != 'velocity':
         raise ValueError("gauge must be 'length' or 'velocity'")
     if mol.ecp or mol.pseudo:

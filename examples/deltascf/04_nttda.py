@@ -13,66 +13,51 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Run deltaS=-1 NTTDA with SGM/FR delta-SCF references for CH4.
-
-Optimize the core-excited triplet with SGM or FR, then use it as the
-reference for singlet NTTDA. Use the CH4 geometry and C 1s/LUMO guess
-from 01_sgm.py and 02_fr.py, with a 6-31G* basis and the default grid.
-"""
+"""C1 CH4: core-excited NTTDA singlets and transitions from the lowest root."""
 
 import numpy as np
 from pyscf import gto
 from pyscf.data import nist
-from nest import nttda  # Registers NTTDA on ROKS.
-from nest.deltascf import fr, sgm
+from nest.deltascf import fr
 
-# 1. Calculate the closed-shell ground state.
 mol = gto.M(
     atom="""
     C  0.0000  0.0000  0.0000
-    H  0.6276  0.6276  0.6276
-    H  0.6276 -0.6276 -0.6276
-    H -0.6276  0.6276 -0.6276
-    H -0.6276 -0.6276  0.6276
+    H  0.6776  0.6076  0.6576
+    H  0.6076 -0.6676 -0.6176
+    H -0.6476  0.6576 -0.6076
+    H -0.5976 -0.6176  0.6476
     """,
-    basis='631G*',
+    basis='6-31g*',
     spin=0,
     symmetry=False,
 )
-ground = mol.RKS(xc='BHandHLYP')
-ground.kernel()
+ground = mol.RKS(xc='BHandHLYP').run()
 
-# 2. Make a triplet guess by changing two occupations from 2/0 to 1/1.
-# Indices start at zero: orbital 0 is C 1s, orbital 5 is the ground-state LUMO.
-hole_index = 0
-particle_index = 5
-initial_orbitals = ground.mo_coeff.copy()
-initial_occupations = ground.mo_occ.copy()
-initial_occupations[hole_index] = 1
-initial_occupations[particle_index] = 1
+# Optimize the C 1s -> LUMO triplet. MO indices start at zero.
+occupations = ground.mo_occ.copy()
+occupations[0] = occupations[5] = 1
+triplet = mol.copy()
+triplet.spin = 2
+reference = fr.FR(triplet.ROKS(xc=ground.xc))
+reference.max_cycle = 100
+reference.kernel(ground.mo_coeff, occupations)
 
-# 3. Optimize the delta-SCF triplet reference with SGM or FR.
-triplet_mol = mol.copy()
-triplet_mol.spin = 2
-
-triplet_scf = triplet_mol.ROKS(xc=ground.xc)
-excited = fr.FR(triplet_scf)  # or sgm.SGM(triplet_scf)
-excited.verbose = 4
-excited.kernel(initial_orbitals, initial_occupations)
-excited.analyze(verbose=4)
-
-# 4. Run deltaS=-1 NTTDA on the optimized delta-SCF reference.
-reference = excited  # for SGM, reference = excited.undo_sgm()
 td = reference.NTTDA()
-td.deltaS = -1  # S_reference=1 -> S_final=0 (singlets).
-td.nstates = 10  # Include core-excited singlets above the lower valence roots.
+td.deltaS = -1
+td.nstates = 15  # Includes the lower roots that refill the core hole.
+td.max_cycle = 100
 td.kernel()
-td.analyze(verbose=4)
+td.analyze()
 
-# Supplementary excitation-energy comparison.
-# E_triplet - E_RKS defines the delta-SCF gap for the settings used here.
-# omega is relative to the triplet, so add that gap for a common RKS zero.
-delta_scf_ev = (reference.e_tot - ground.e_tot) * nist.HARTREE2EV
-nttda_rks_ev = delta_scf_ev + td.e * nist.HARTREE2EV
-nttda_excitation_ev = (td.e - td.e[0]) * nist.HARTREE2EV
-print(f'delta-SCF triplet excitation = {delta_scf_ev:.6f} eV')
+# For this CH4 reference, core-excited roots lie within 30 eV of the triplet;
+# the refilled-core roots have omega around -290 eV. Root numbers are 1-based.
+states = np.flatnonzero(abs(td.e * nist.HARTREE2EV) < 30) + 1
+
+# ref=1 is the lowest NTTDA singlet, not the triplet SCF reference.
+energy = (td.e[states - 1] - td.e[0]) * nist.HARTREE2EV
+length = td.oscillator_strength(ref=1, state=states)
+velocity = td.oscillator_strength(ref=1, state=states, gauge='velocity')
+print('root   E_NTTDA/eV    f_length       f_velocity')
+for i, state in enumerate(states):
+    print(f'{state:3d}  {energy[i]:11.4f}  {length[i]:.6e}  {velocity[i]:.6e}')

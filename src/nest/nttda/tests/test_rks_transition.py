@@ -1,280 +1,140 @@
 # Copyright 2026 The NEST Developers. All Rights Reserved.
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# http://www.apache.org/licenses/LICENSE-2.0
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Algebra tests using direct minors and PySCF's full-CI one-body operator."""
-
-from itertools import combinations
 import unittest
-import warnings
-
 import numpy as np
 from pyscf import fci, gto
-
+from nest.deltascf import fr
 from nest.nttda import NTTDA, rks
-from nest.nttda.nttda import transition_dm, _orbital_indices, _dipole_integrals
+from nest.nttda.nttda import _orbital_indices
 
 
-def direct_element(matrix, operator):
-    # Deliberately slow oracle: explicit minors, including singular M.
-    cofactor = np.empty_like(matrix)
-    for i in range(len(matrix)):
-        for j in range(len(matrix)):
-            minor = np.delete(np.delete(matrix, i, axis=0), j, axis=1)
-            cofactor[i, j] = (-1) ** (i + j) * np.linalg.det(minor)
-    return np.linalg.det(matrix), np.einsum('ij,xij->x', cofactor, operator)
+class KnownValues(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        mol = gto.Mole()
+        mol.verbose = 0
+        mol.output = '/dev/null'
+        mol.atom = """
+        C  0.0000  0.0000  0.0000
+        H  0.6776  0.6076  0.6576
+        H  0.6076 -0.6676 -0.6176
+        H -0.6476  0.6576 -0.6076
+        H -0.5976 -0.6176  0.6476
+        """
+        mol.basis = '631g'
+        cls.mol = mol.build()
 
+    @classmethod
+    def tearDownClass(cls):
+        cls.mol.stdout.close()
 
-def make_problem(charge=0):
-    # Synthetic orthonormal orbitals and normalized singlet amplitudes isolate
-    # matrix-element algebra from SCF/eigensolver convergence. No SCF is run.
-    mol = gto.M(atom='H 0 0 0; H 0.2 0 1.3; H 1.4 0.1 0; H 1.1 0.3 1.5',
-                basis='sto-3g', charge=charge, verbose=0)
-    ground = mol.RKS()
-    triplet_mol = mol.copy()
-    triplet_mol.spin = 2
-    mf = triplet_mol.ROKS()
-    s = ground.get_ovlp()
-    values, vectors = np.linalg.eigh(s)
-    mf.mo_coeff = (vectors / np.sqrt(values)) @ vectors.T
-    rng = np.random.default_rng(17)
-    rotation = np.linalg.qr(rng.normal(size=s.shape))[0]
-    ground.mo_coeff = mf.mo_coeff @ rotation
-    nocc = mol.nelectron // 2
-    ground.mo_occ = np.array([2] * nocc + [0] * (mol.nao - nocc))
-    mf.mo_occ = np.zeros(mol.nao)
-    mf.mo_occ[[0, 2]] = 1
-    if nocc == 2:
-        mf.mo_occ[1] = 2  # C/O/V are deliberately non-contiguous.
-    ground.e_tot, mf.e_tot = -2.0, -1.5
-    td = NTTDA(mf)
-    td.deltaS = -1
-    cs, os, vs = _orbital_indices(td)
-    nc, no, nv = len(cs), len(os), len(vs)
-    x = rng.normal(size=(3, nc + no, no + nv))
-    for root in x:
-        root[nc:, :no] -= np.eye(no) * np.trace(root[nc:, :no]) / no
-    x = np.linalg.qr(x.reshape(3, -1).T)[0].T.reshape(x.shape)
-    td.xy = [(root, 0) for root in x]
-    td.e = np.array([-0.7, 0.2, 0.4])
-    return ground, td
+    def test_bhandhlyp_rks_transition(self):
+        ground = self.mol.RKS(xc='BHandHLYP').run()
+        triplet = self.mol.copy()
+        triplet.spin = 2
+        occupations = ground.mo_occ.copy()
+        occupations[0] = occupations[5] = 1
+        reference = fr.FR(triplet.ROKS(xc=ground.xc))
+        reference.max_cycle = 100
+        reference.kernel(ground.mo_coeff, occupations)
+        self.assertTrue(ground.converged and reference.freeze_converged and reference.converged)
+        td = reference.NTTDA().set(deltaS=-1, nstates=10, max_cycle=100).run()
+        self.assertTrue(np.all(td.converged))
 
+        states = np.array([6, 7, 8])
+        length = rks.transition_properties(td, ground, state=states)
+        velocity = rks.transition_properties(td, ground, state=states, gauge='velocity')
+        # RKS and lowest-NTTDA energy zeros, then both gauges for each initial state.
+        actual = np.column_stack((
+            length['excitation_energy'], td.e[states - 1] - td.e[0],
+            length['oscillator_strength'], velocity['oscillator_strength'],
+            td.oscillator_strength(state=states), td.oscillator_strength(state=states, gauge='velocity'),
+        ))
+        expected = np.array([
+            [10.712278470040, 10.788020457156, 0.000871055425, 0.000786624652, 0.001142923885, 0.001065660415],
+            [10.748238647355, 10.823980634470, 0.040416228826, 0.037064944885, 0.030114708832, 0.029810493892],
+            [10.757011472634, 10.832753459749, 0.039844029975, 0.036747569163, 0.030580935131, 0.030493267562],
+        ])
+        self.assertAlmostEqual(abs(actual - expected).max(), 0, delta=1e-5)
 
-def full_ci_states(td):
-    nmo = len(td._scf.mo_occ)
-    cs, os, vs = _orbital_indices(td)
-    strings = list(map(int, fci.cistring.make_strings(range(nmo), len(cs) + 1)))
-    address = {s: i for i, s in enumerate(strings)}
-    basis = list(rks._singlet_csfs(cs, os, vs, nmo))
-    expansion = np.zeros((len(basis), len(strings), len(strings)))
-    for row, csf in enumerate(basis):
-        for det, coefficient in csf.items():
-            alpha, beta = det & ((1 << nmo) - 1), det >> nmo
-            expansion[row, address[alpha], address[beta]] = coefficient
-    amplitudes = np.array([root.ravel() for root, _ in td.xy])
-    return np.einsum('ri,iab->rab', amplitudes, expansion), expansion, strings
-
-
-class RksTransitionTests(unittest.TestCase):
-    def test_column_updates_and_svd_against_minors(self):
-        rng = np.random.default_rng(6)
-        cross_r = rng.normal(size=(3, 3, 7))  # Non-symmetric operators catch transposes.
-        regular = np.linalg.qr(rng.normal(size=(7, 7)))[0][:3]
-        same_mos = np.eye(7)[[0, 2, 4]]
-        singular_base = np.eye(7)[[1, 3, 5]]
-        for cross_s in (regular, same_mos, singular_base):
-            filled = [0, 2, 4]
-            occupied = [o for o in combinations(range(7), 3) if len(set(o) - set(filled)) <= 2]
-            result = rks._spin_elements(cross_s, cross_r, occupied, filled)
-            for occ in occupied:
-                expected_s, expected_r = direct_element(cross_s[:, occ], cross_r[:, :, occ])
-                actual_s, actual_r = result[occ]
-                self.assertAlmostEqual(actual_s, expected_s, delta=2e-12)
-                np.testing.assert_allclose(actual_r, expected_r, atol=2e-12, rtol=0)
-        # A tiny 1x1 auxiliary matrix has cond=1 but must use the SVD path.
-        result = rks._spin_elements(np.array([[1e-14, 1.0]]), np.ones((3, 1, 2)), [(0,), (1,)], [0])
-        np.testing.assert_allclose(result[(1,)][1], np.ones(3), atol=1e-14)
-
-    def test_svd_singular_one_body_selection_rule(self):
-        rng = np.random.default_rng(51)
-        for n in (1, 2, 5):
-            u = np.linalg.qr(rng.normal(size=(n, n)))[0]
-            v = np.linalg.qr(rng.normal(size=(n, n)))[0]
-            operator = rng.normal(size=(3, n, n))
-            for rank in range(n + 1):
-                matrix = (u * np.array([0.7] * rank + [0.0] * (n - rank))) @ v.T
-                expected_s, expected_r = direct_element(matrix, operator)
-                actual_s, actual_r = rks._svd_element(matrix, operator)
-                self.assertAlmostEqual(actual_s, expected_s, delta=1e-12)
-                np.testing.assert_allclose(actual_r, expected_r, atol=1e-12, rtol=0)
-
-    def test_csfs_spin_and_existing_nttda_density(self):
-        _, td = make_problem()
-        ci, expansion, _ = full_ci_states(td)
-        flat = expansion.reshape(len(expansion), -1)
-        np.testing.assert_allclose(flat @ flat.T, np.eye(len(expansion)), atol=1e-14)
-        for i, bra in enumerate(ci):
-            self.assertAlmostEqual(fci.spin_op.spin_square0(bra, 4, (2, 2))[0], 0, delta=1e-13)
-            for j, ket in enumerate(ci):
-                if i != j:
-                    gamma = fci.direct_spin1.trans_rdm1(bra, ket, 4, (2, 2)).T
-                    np.testing.assert_allclose(transition_dm(td, i, j), gamma, atol=2e-14, rtol=0)
-
-    def test_independent_orbitals_against_full_ci(self):
-        ground, td = make_problem()
-        actual = rks.transition_properties(td, ground)
-        ci, _, strings = full_ci_states(td)
-        ct = td._scf.mo_coeff
-        # Expand the independent RKS determinant into the complete NTTDA MO
-        # Fock space using exterior products; evaluate r with PySCF FCI.
-        transform = ct.T @ ground.get_ovlp() @ ground.mo_coeff[:, ground.mo_occ == 2]
-        coefficients = [np.linalg.det(transform[[p for p in range(4) if (s >> p) & 1]]) for s in strings]
-        bra = np.outer(coefficients, coefficients)
-        dip_mo = np.einsum('up,xuv,vq->xpq', ct, ground.mol.intor_symmetric('int1e_r', comp=3), ct)
-        for i, ket in enumerate(ci):
-            self.assertAlmostEqual(actual['overlap'][i], np.vdot(bra, ket), delta=2e-14)
-            gamma = fci.direct_spin1.trans_rdm1(bra, ket, 4, (2, 2)).T
-            np.testing.assert_allclose(actual['electronic_dipole'][i], np.einsum('pq,xpq->x', gamma, dip_mo),
-                                       atol=2e-14, rtol=0)
-        np.testing.assert_allclose(actual['excitation_energy'], td.e + 0.5, atol=1e-14)
-        np.testing.assert_allclose(actual['oscillator_strength'],
-                                   (2 / 3) * (td.e + 0.5) * np.sum(actual['dipole']**2, axis=1))
-        self.assertLess(actual['oscillator_strength'][0], 0)
-        selected = rks.transition_properties(td, ground, state=[3, 1])
-        for key in actual:
-            np.testing.assert_allclose(selected[key], actual[key][[2, 0]])
-        self.assertEqual(rks.transition_properties(td, ground, state=2)['dipole'].shape, (1, 3))
-        # An occupied RKS rotation changes each spin determinant's phase by
-        # det(U), so the full closed-shell determinant is unchanged.
-        ground.mo_coeff[:, :2] = ground.mo_coeff[:, :2] @ np.array([[0.6, 0.8], [0.8, -0.6]])
-        rotated = rks.transition_properties(td, ground)
-        for key in actual:
-            np.testing.assert_allclose(rotated[key], actual[key], atol=2e-14, rtol=0)
-
-    def test_origin_and_charged_warning(self):
-        shift = np.array([1.2, -0.7, 0.4])
-        for charge in (0, 2):
-            ground, td = make_problem(charge)
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter('always')
-                original = rks.transition_properties(td, ground)
-                moved = rks.transition_properties(td, ground, origin=shift)
-            self.assertEqual(len(caught), 0 if charge == 0 else 2)  # Once per call, not per root.
-            if charge:
-                self.assertIn('charge=2', str(caught[0].message))
-                self.assertIn('max|overlap|', str(caught[0].message))
-            overlap_shift = original['overlap'][:, None] * shift
-            np.testing.assert_allclose(moved['electronic_dipole'],
-                                       original['electronic_dipole'] - ground.mol.nelectron * overlap_shift, atol=2e-14)
-            np.testing.assert_allclose(moved['dipole'], original['dipole'] + charge * overlap_shift, atol=2e-14)
-            if charge == 0:
-                np.testing.assert_allclose(moved['oscillator_strength'], original['oscillator_strength'], atol=2e-14)
-
-    def test_frozen_orbitals_retain_reference_electrons(self):
-        ground, full = make_problem()
-        frozen = NTTDA(full._scf, frozen=[1, 3])  # All closed and virtual MOs in this small example.
-        frozen.deltaS = -1
-        frozen.e = full.e.copy()
-        # Keep the OO block, orthonormalize its physical singlet vectors,
-        # and embed them in the full space as an independent comparison.
-        oo = np.array([x[1:, :2].ravel() for x, _ in full.xy])
-        oo = np.linalg.qr(oo.T)[0].T.reshape(3, 2, 2)
-        frozen.xy = [(x, 0) for x in oo]
-        full.xy = []
-        for x in oo:
-            padded = np.zeros((3, 3))
-            padded[1:, :2] = x
-            full.xy.append((padded, 0))
-        expected = rks.transition_properties(full, ground)
-        actual = rks.transition_properties(frozen, ground)
-        for key in expected:
-            np.testing.assert_allclose(actual[key], expected[key], atol=2e-14, rtol=0)
-
-    def test_velocity_operator_sign_by_overlap_derivative(self):
-        ground, _ = make_problem()
-        mol = ground.mol
-        step = 1e-4
-        derivative = []
-        for axis in range(3):
-            displacement = np.eye(3)[axis] * step
-            plus = mol.copy().set_geom_(mol.atom_coords() + displacement, unit='Bohr')
-            minus = mol.copy().set_geom_(mol.atom_coords() - displacement, unit='Bohr')
-            derivative.append((gto.intor_cross('int1e_ovlp', mol, plus)
-                               - gto.intor_cross('int1e_ovlp', mol, minus)) / (2 * step))
-        # Moving every ket center differentiates -nabla acting on the ket.
-        velocity = _dipole_integrals(ground, 'velocity')
-        np.testing.assert_allclose(velocity, -np.array(derivative), atol=2e-9, rtol=0)
-        np.testing.assert_allclose(velocity, -velocity.transpose(0, 2, 1), atol=1e-14, rtol=0)
-
-    def test_velocity_matrix_elements_against_full_ci(self):
-        ground, td = make_problem()
-        ci, _, strings = full_ci_states(td)
-        ct = td._scf.mo_coeff
-        momentum = -ground.mol.intor('int1e_ipovlp', comp=3, hermi=0)
-        momentum_mo = np.einsum('up,xuv,vq->xpq', ct, momentum, ct)
-        for i, bra in enumerate(ci):
-            for j, ket in enumerate(ci):
-                if i == j:
-                    continue
-                gamma = fci.direct_spin1.trans_rdm1(bra, ket, 4, (2, 2)).T
-                expected = np.einsum('pq,xpq->x', gamma, momentum_mo)
-                np.testing.assert_allclose(td.transition_velocity_dipole(ref=i + 1, state=j + 1)[0],
-                                           expected, atol=2e-14, rtol=0)
-                self.assertAlmostEqual(td.oscillator_strength(ref=i + 1, state=j + 1, gauge='velocity'),
-                                       (2 / 3) * np.dot(expected, expected) / (td.e[j] - td.e[i]), delta=2e-14)
-        transform = ct.T @ ground.get_ovlp() @ ground.mo_coeff[:, ground.mo_occ == 2]
-        coefficients = [np.linalg.det(transform[[p for p in range(4) if (s >> p) & 1]]) for s in strings]
-        bra = np.outer(coefficients, coefficients)
-        actual = rks.transition_properties(td, ground, gauge='velocity')
-        for i, ket in enumerate(ci):
-            gamma = fci.direct_spin1.trans_rdm1(bra, ket, 4, (2, 2)).T
-            expected = np.einsum('pq,xpq->x', gamma, momentum_mo)
-            np.testing.assert_allclose(actual['velocity_dipole'][i], expected, atol=2e-14, rtol=0)
-            self.assertAlmostEqual(actual['oscillator_strength'][i],
-                                   (2 / 3) * np.dot(expected, expected) / (td.e[i] + 0.5), delta=2e-14)
-        length = rks.transition_properties(td, ground)
-        np.testing.assert_allclose(actual['dipole'], length['dipole'], atol=2e-14, rtol=0)
-
-    def test_velocity_charged_origin_independence_and_zero_energy(self):
-        ground, td = make_problem(charge=2)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
-            original = rks.transition_properties(td, ground, gauge='velocity')
-            shifted = rks.transition_properties(td, ground, origin=[1, 2, 3], gauge='velocity')
-        self.assertEqual(len(caught), 0)
-        for key in ('velocity_dipole', 'oscillator_strength'):
-            np.testing.assert_allclose(shifted[key], original[key], atol=1e-14, rtol=0)
-        td.e[1] = td.e[0]
-        with self.assertRaisesRegex(ValueError, 'nonzero transition energies'):
-            td.oscillator_strength(state=2, gauge='velocity')
-        td.e[0] = ground.e_tot - td._scf.e_tot
-        with self.assertRaisesRegex(ValueError, 'nonzero transition energies'):
-            rks.transition_properties(td, ground, state=1, gauge='velocity')
-
-    def test_unsupported_inputs(self):
-        ground, td = make_problem()
-        for state in (0, 4, 1.5):
-            with self.assertRaises(ValueError):
-                rks.transition_properties(td, ground, state=state)
-        td.deltaS = 0
-        with self.assertRaisesRegex(ValueError, 'deltaS=-1'):
-            rks.transition_properties(td, ground)
+    def test_transition_against_fci(self):
+        # Four electrons in independent MO sets; expand both states in the
+        # same full-CI space and evaluate the one-body density with PySCF.
+        mol = gto.M(atom='H 0 0 0; H .2 0 1.3; H 1.4 .1 0; H 1.1 .3 1.5',
+                    basis='631g', verbose=0)
+        ground = mol.RKS()
+        triplet = mol.copy()
+        triplet.spin = 2
+        mf = triplet.ROKS()
+        overlap_ao = ground.get_ovlp()
+        values, vectors = np.linalg.eigh(overlap_ao)
+        mf.mo_coeff = (vectors / np.sqrt(values)) @ vectors.T
+        rng = np.random.default_rng(17)
+        ground.mo_coeff = mf.mo_coeff @ np.linalg.qr(rng.normal(size=overlap_ao.shape))[0]
+        nmo = mol.nao
+        ground.mo_occ = np.array([2, 2] + [0] * (nmo - 2))
+        mf.mo_occ = np.array([1, 2, 1] + [0] * (nmo - 3))
+        ground.e_tot, mf.e_tot = -2., -1.5
+        td = NTTDA(mf)
         td.deltaS = -1
-        ground = ground.sfx2c1e()
-        with self.assertRaisesRegex(ValueError, 'representation'):
-            rks.transition_properties(td, ground)
-        td._scf = td._scf.sfx2c1e()
-        td._scf.with_x2c.xuncontract = False
-        with self.assertRaisesRegex(ValueError, 'decoupling settings'):
-            rks.transition_properties(td, ground)
+        cs, os, vs = _orbital_indices(td)
+        amplitudes = rng.normal(size=(3, len(cs) + 2, len(vs) + 2))
+        for root in amplitudes:
+            root[len(cs):, :2] -= np.eye(2) * np.trace(root[len(cs):, :2]) / 2
+        amplitudes = np.linalg.qr(amplitudes.reshape(3, -1).T)[0].T.reshape(amplitudes.shape)
+        td.xy = [(root, 0) for root in amplitudes]
+        td.e = np.array([-.7, .2, .4])
+
+        strings = list(map(int, fci.cistring.make_strings(range(nmo), 2)))
+        address = {s: i for i, s in enumerate(strings)}
+        csfs = list(rks._singlet_csfs(cs, os, vs, nmo))
+        expansion = np.zeros((len(csfs), len(strings), len(strings)))
+        for row, csf in enumerate(csfs):
+            for det, coefficient in csf.items():
+                alpha, beta = det & ((1 << nmo) - 1), det >> nmo
+                expansion[row, address[alpha], address[beta]] = coefficient
+        ci = np.einsum('ri,iab->rab', amplitudes.reshape(3, -1), expansion)
+        ct = mf.mo_coeff
+        transform = ct.T @ overlap_ao @ ground.mo_coeff[:, :2]
+        coefficients = [np.linalg.det(transform[[p for p in range(nmo) if (s >> p) & 1]]) for s in strings]
+        bra = np.outer(coefficients, coefficients)
+
+        masses = mol.atom_mass_list()
+        origin = masses @ mol.atom_coords() / masses.sum()
+        with mol.with_common_orig(origin):
+            length_ao = mol.intor_symmetric('int1e_r', comp=3)
+        velocity_ao = -mol.intor('int1e_ipovlp', comp=3)
+        nuclear = mol.atom_charges() @ (mol.atom_coords() - origin)
+        for gauge, operator in (('length', length_ao), ('velocity', velocity_ao)):
+            actual = rks.transition_properties(td, ground, gauge=gauge)
+            operator_mo = np.einsum('up,xuv,vq->xpq', ct, operator, ct)
+            for i, ket in enumerate(ci):
+                overlap = np.vdot(bra, ket)
+                gamma = fci.direct_spin1.trans_rdm1(bra, ket, nmo, (2, 2)).T
+                moment = np.einsum('pq,xpq->x', gamma, operator_mo)
+                self.assertAlmostEqual(actual['overlap'][i], overlap, delta=1e-12)
+                if gauge == 'length':
+                    moment -= nuclear * overlap
+                    key, factor = 'dipole', td.e[i] + .5
+                else:
+                    key, factor = 'velocity_dipole', 1 / (td.e[i] + .5)
+                self.assertAlmostEqual(abs(actual[key][i] - moment).max(), 0, delta=1e-12)
+                self.assertAlmostEqual(actual['oscillator_strength'][i],
+                                       (2 / 3) * factor * np.dot(moment, moment), delta=1e-12)
 
 
 if __name__ == '__main__':
+    print('Full tests for RKS-to-NTTDA transition properties')
     unittest.main()

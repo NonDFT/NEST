@@ -1,8 +1,11 @@
 # Copyright 2026 The NEST Developers. All Rights Reserved.
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# http://www.apache.org/licenses/LICENSE-2.0
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,23 +22,12 @@ R = C_RKS,occ.T @ r_AO @ C_det,occ give
     <RKS|sum_i r_i|det> = det(M_beta) sum_ij cof(M_alpha)_ij R_alpha,ij
                        + det(M_alpha) sum_ij cof(M_beta)_ij R_beta,ij.
 
-The cofactor contraction is the derivative of det(M + t R) at t=0.
-It remains valid when M is singular; det(M) * inv(M) must not be used
-for such a target determinant. See Burton, J. Chem. Phys. 154, 144109
-(2021), https://doi.org/10.1063/5.0045442, for nonorthogonal matrix elements.
-
-Only real orbitals are supported (nonrelativistic or matching sfX2C1e),
-with a closed-shell RKS bra and a two-SOMO triplet ROKS reference for
-deltaS=-1 NTTDA. The states
-are used as supplied, without an extra orthogonalization or OO projection.
-These are matrix elements of the determinant/CSF model wavefunctions,
-not a TDDFT response derivation for independently optimized states.
+Ref: JCP, 2021, 154, 144109.
 """
 
 import warnings
 
 import numpy as np
-from pyscf import gto
 
 from nest.nttda.nttda import _orbital_indices, _dipole_integrals
 
@@ -186,102 +178,51 @@ def _spin_elements(cross_s, cross_r, occupations, filled):
 
 
 def transition_properties(tdobj, ground, state=None, origin=None, gauge='length', picture_change=True):
-    """RKS -> singlet NTTDA overlaps, dipoles and oscillator strengths.
+    """Transition properties from a closed-shell RKS ground state to singlet NTTDA.
 
-    Args:
-        tdobj: Computed deltaS=-1 NTTDA on a two-SOMO triplet ROKS reference.
-            Frozen closed/virtual orbitals are supported; frozen closed
-            orbitals remain occupied in the determinant matrix elements.
-        ground: Converged closed-shell RKS at the same geometry and in the
-            same AO basis/order. Its MOs may differ from the ROKS MOs.
-        state: 1-based computed root or sequence of roots; None selects all.
-        origin: Dipole origin in Bohr; None means (0, 0, 0).
-        gauge: 'length' (default) or 'velocity', selecting the oscillator
-            strength formula. The returned electronic_dipole and dipole
-            always contain length-gauge matrix elements, in either case.
-        picture_change: Apply sfX2C1e picture change to r and Dirac velocity
-            c*alpha (default True). False uses bare nonrelativistic r/p
-            integrals as a diagnostic. Both SCF objects must use matching
-            sfX2C1e settings; auxiliary X2C basis sets are not supported.
+    Use deltaS=-1 NTTDA on a triplet ROKS reference. Both SCF objects must
+    have the same geometry, AO basis and relativistic settings; their MOs
+    may differ. Only real orbitals and amplitudes are supported.
+    ``state`` selects 1-based roots; None selects all computed roots.
 
-    Returns:
-        Dictionary of arrays, retaining a root axis even for one state:
-        ``state`` (1-based), ``overlap`` = <RKS|I>, ``electronic_dipole`` =
-        <RKS|sum_i (r_i-origin)|I>, ``dipole`` = electronic_dipole minus
-        sum_A Z_A (R_A-origin) * overlap, ``excitation_energy`` =
-        E_ROKS + omega_I - E_RKS (Hartree), and ``oscillator_strength`` =
-        (2/3) excitation_energy * |dipole|^2. Dipoles have shape (n_roots,3)
-        and units ea0. ``dipole`` is the NEGATIVE of the physical total
-        electric dipole, preserving NEST's positive electronic-r convention.
-        With gauge='velocity', also returns ``velocity_dipole`` =
-        i<RKS|sum v_i|I> (real, in atomic units), and oscillator_strength
-        instead uses (2/3)*|velocity_dipole|^2/excitation_energy. The physical
-        velocity is -i times velocity_dipole; v=p in the nonrelativistic
-        model and is picture-changed c*alpha for sfX2C1e. Divide velocity_dipole by the
-        excitation energy to compare its magnitude with a length dipole.
+    Returns a dictionary with ``state``, ``overlap``, ``excitation_energy``
+    (E_ROKS + omega - E_RKS, Hartree), and ``oscillator_strength``.
+    Length gauge adds ``electronic_dipole`` and ``dipole`` (including the
+    nuclear term, positive electronic-r convention). Velocity gauge adds
+    only ``velocity_dipole`` = i<v>. Moments have shape (n_states, 3), in a.u.
 
-    No roots are filtered: de-excitation roots may give negative energies
-    and strengths. All input SCF calculations and selected roots should be
-    converged. Root phases are arbitrary; compare norms/outer products.
-
-    Including the nuclear term makes neutral-system results origin invariant
-    even for nonzero overlap. For charge Q, moving the origin by a gives
-    dipole' = dipole + Q*a*overlap; a warning is emitted when Q != 0 and
-    max|overlap| > 1e-8 when requesting length-gauge strengths. Velocity
-    strengths are origin independent (also for ions) and need nonzero
-    excitation energies. The states are not orthogonalized, so strengths
-    in either gauge are approximate and need not agree.
+    The dipole origin defaults to the center of mass; an explicit ``origin``
+    is in Bohr. sfX2C1e operators include picture change by default.
+    States are not orthogonalized; the two gauges need not agree.
     """
     mf, mol = tdobj._scf, tdobj._scf.mol
-    if gauge not in ('length', 'velocity'):
-        raise ValueError("gauge must be 'length' or 'velocity'")
     cg, ct = np.asarray(ground.mo_coeff), np.asarray(mf.mo_coeff)
     ground_occ, ref_occ = np.asarray(ground.mo_occ), np.asarray(mf.mo_occ)
-    if (cg.ndim != 2 or ct.ndim != 2 or ground_occ.ndim != 1 or ref_occ.ndim != 1
-            or not np.all(np.isin(ground_occ, [0, 2])) or not np.all(np.isin(ref_occ, [0, 1, 2]))):
-        raise ValueError('Real restricted RKS/ROKS orbitals with integer occupations are required')
     cs, os, vs = _orbital_indices(tdobj)
     reference_cs = np.flatnonzero(ref_occ == 2)
     if tdobj.deltaS != -1 or len(os) != 2 or mol.spin != 2 or ground.mol.spin != 0:
-        raise ValueError('Requires a closed-shell ground state and deltaS=-1 NTTDA on a triplet ROKS reference')
-    if (ground.mol.nelectron != mol.nelectron or np.count_nonzero(ground_occ == 2) != len(reference_cs) + 1):
+        raise ValueError('Requires a closed-shell RKS ground state and deltaS=-1 NTTDA on a triplet ROKS reference')
+    if ground.mol.nelectron != mol.nelectron:
         raise ValueError('RKS and NTTDA must have the same number of electrons')
-    if (ground.mol.natm != mol.natm or ground.mol.cart != mol.cart
-            or [ground.mol.atom_symbol(i) for i in range(mol.natm)] != [mol.atom_symbol(i) for i in range(mol.natm)]
-            or not np.allclose(ground.mol.atom_coords(), mol.atom_coords(), atol=1e-10, rtol=0)
-            or not gto.same_basis_set(ground.mol, mol)):
-        raise ValueError('RKS and NTTDA must use the same geometry and AO basis/order')
     gx = getattr(ground, 'with_x2c', None) or None
     tx = getattr(mf, 'with_x2c', None) or None
-    if (gx is None) != (tx is None):
-        raise ValueError('RKS and ROKS must use the same nonrelativistic or sfX2C1e representation')
-    if gx is not None:
-        from pyscf.x2c.sfx2c1e import SpinFreeX2CHelper
-        if not isinstance(gx, SpinFreeX2CHelper) or not isinstance(tx, SpinFreeX2CHelper):
-            raise NotImplementedError('Only spin-free X2C1e transition operators are supported')
-        # For 1e X2C the decoupling is state independent. With the same
-        # geometry, AO basis and helper settings, both states share a
-        # representation and the ordinary AO overlap metric is valid.
-        if any(getattr(gx, key) != getattr(tx, key) for key in ('approx', 'basis', 'xuncontract')):
-            raise ValueError('RKS and ROKS must use matching sfX2C1e decoupling settings')
-    states = np.arange(1, len(tdobj.xy) + 1) if state is None else np.atleast_1d(state)
-    if states.ndim != 1 or not len(states) or np.any(states != states.astype(int)):
-        raise ValueError('state must contain integer computed-root indices (1-based)')
-    states = states.astype(int)
+    if ((gx is None) != (tx is None)
+            or gx is not None and any(getattr(gx, k) != getattr(tx, k) for k in ('approx', 'basis', 'xuncontract'))):
+        raise ValueError('RKS and ROKS must use matching nonrelativistic or sfX2C1e settings')
+    states = np.arange(1, len(tdobj.xy) + 1) if state is None else np.atleast_1d(state).astype(int)
     if np.any(states < 1) or np.any(states > len(tdobj.xy)):
         raise ValueError('state must index computed roots (1-based)')
-    amplitudes = np.array([np.asarray(tdobj.xy[i - 1][0]).ravel() for i in states])
+    amplitudes = np.array([tdobj.xy[i - 1][0].ravel() for i in states])
     if any(np.iscomplexobj(a) for a in (cg, ct, amplitudes)):
         raise NotImplementedError('Complex orbitals/amplitudes are not implemented here')
 
     cg = cg[:, ground_occ == 2]
-    origin = np.zeros(3) if origin is None else np.asarray(origin, dtype=float)
+    if origin is None:
+        masses = mol.atom_mass_list()
+        origin = masses @ mol.atom_coords() / masses.sum()
     cross_s = cg.T @ ground.get_ovlp() @ ct
-    dip_ao = _dipole_integrals(mf, 'length', origin, picture_change=picture_change)
-    if gauge == 'velocity':
-        # Both gauges reuse the same determinant expansion and occupied
-        # overlap solves; only the one-electron integrals differ.
-        dip_ao = np.concatenate((dip_ao, _dipole_integrals(mf, 'velocity', picture_change=picture_change)))
+    with mol.with_common_orig(origin):
+        dip_ao = _dipole_integrals(mf, gauge, picture_change=picture_change)
     cross_r = np.einsum('up,xuv,vq->xpq', cg, dip_ao, ct, optimize=True)
 
     basis = list(_singlet_csfs(cs, os, vs, ct.shape[1], reference_cs))
@@ -293,12 +234,12 @@ def transition_properties(tdobj, ground, state=None, origin=None, gauge='length'
         occupations[det] = alpha, beta
     spin_occupations = {occupied for spins in occupations.values() for occupied in spins}
     # Either SOMO can define the auxiliary closed shell. Choose the better
-    # conditioned overlap, without assuming that a particular SOMO is core.
+    # conditioned overlap matrix without assuming which SOMO is the core.
     candidates = [sorted([*reference_cs, orbital]) for orbital in os]
     filled = max(candidates, key=lambda occupied: np.linalg.svd(cross_s[:, occupied], compute_uv=False)[-1])
     elements = _spin_elements(cross_s, cross_r, spin_occupations, filled)
     basis_overlap = np.zeros(len(basis))
-    basis_dipole = np.zeros((len(basis), len(dip_ao)))
+    basis_dipole = np.zeros((len(basis), 3))
     for i, csf in enumerate(basis):
         for det, coefficient in csf.items():
             alpha, beta = occupations[det]
@@ -308,24 +249,20 @@ def transition_properties(tdobj, ground, state=None, origin=None, gauge='length'
             basis_dipole[i] += coefficient * (sb * ra + sa * rb)
     overlap = amplitudes @ basis_overlap
     moments = amplitudes @ basis_dipole
-    electronic = moments[:, :3]
-    nuclear = mol.atom_charges() @ (mol.atom_coords() - origin)
-    dipole = electronic - overlap[:, None] * nuclear
     energy = mf.e_tot + np.asarray(tdobj.e)[states - 1] - ground.e_tot
-    strength = (2.0 / 3.0) * energy * np.einsum('nx,nx->n', dipole, dipole)
-    result = dict(state=states, overlap=overlap, electronic_dipole=electronic, dipole=dipole,
-                  excitation_energy=energy, oscillator_strength=strength)
-    if gauge == 'velocity':
+    result = dict(state=states, overlap=overlap, excitation_energy=energy)
+    if gauge == 'length':
+        nuclear = mol.atom_charges() @ (mol.atom_coords() - origin)
+        dipole = moments - overlap[:, None] * nuclear
+        result['electronic_dipole'] = moments
+        result['dipole'] = dipole
+        result['oscillator_strength'] = (2.0 / 3.0) * energy * np.einsum('nx,nx->n', dipole, dipole)
+        if mol.charge != 0 and np.max(np.abs(overlap)) > 1e-8:
+            warnings.warn('Nonorthogonal RKS/NTTDA states in a charged system: '
+                          'length-gauge strengths depend on the chosen origin.', stacklevel=2)
+    else:
         if np.any(energy == 0):
             raise ValueError('Velocity-gauge oscillator strengths require nonzero transition energies')
-        velocity = moments[:, 3:]
-        result['velocity_dipole'] = velocity
-        result['oscillator_strength'] = (2.0 / 3.0) * np.einsum('nx,nx->n', velocity, velocity) / energy
-    if gauge == 'length' and mol.charge != 0 and np.max(np.abs(overlap)) > 1e-8:
-        warnings.warn(
-            f'Nonorthogonal RKS/NTTDA states in a charged system (charge={mol.charge}, '
-            f'max|overlap|={np.max(np.abs(overlap)):.3g}): transition dipoles and '
-            'oscillator strengths depend on the chosen origin even with the nuclear term.',
-            UserWarning, stacklevel=2,
-        )
+        result['velocity_dipole'] = moments
+        result['oscillator_strength'] = (2.0 / 3.0) * np.einsum('nx,nx->n', moments, moments) / energy
     return result

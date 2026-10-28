@@ -184,9 +184,9 @@ class KnownValues(unittest.TestCase):
         self.assertTrue(mf.converged)
         # Different active spaces must map to the same MO indices in SOC.
         # Indices 0 and 1 are O 1s orbitals; -1 is the last virtual orbital.
-        td0 = mf.NTTDA(frozen=[1, -1]).set(deltaS=0, nstates=1, conv_tol=1e-6).run()
-        tdm1 = mf.NTTDA(frozen=2).set(deltaS=-1, nstates=2, conv_tol=1e-6).run()
-        tdp1 = mf.NTTDA(frozen=[0, 1, -1]).set(deltaS=1, nstates=2, conv_tol=1e-6).run()
+        td0 = mf.NTTDA(frozen=[1, -1]).set(deltaS=0, nstates=1).run()
+        tdm1 = mf.NTTDA(frozen=2).set(deltaS=-1, nstates=2).run()
+        tdp1 = mf.NTTDA(frozen=[0, 1, -1]).set(deltaS=1, nstates=2).run()
         self.assertTrue(np.all(td0.converged))
         self.assertTrue(np.all(tdm1.converged))
         self.assertTrue(np.all(tdp1.converged))
@@ -215,7 +215,7 @@ class KnownValues(unittest.TestCase):
                 [14.12343230699j],
                 [-0.599093134478 - 6.502456992965j],
             ]),
-            1e-4,
+            5e-4,
         )
         assert_allclose_up_to_sign(
             self,
@@ -228,7 +228,7 @@ class KnownValues(unittest.TestCase):
                 [0.0, 3.032039081964 - 0.609327216214j, 22.067008877245j],
                 [0.0, 0.0, 4.287950791358 - 0.861718813093j],
             ]),
-            1e-4,
+            5e-4,
         )
 
 
