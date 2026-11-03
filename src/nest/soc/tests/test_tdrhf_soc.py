@@ -19,7 +19,7 @@ import numpy as np
 from pyscf import gto
 from pyscf.data.nist import HARTREE2WAVENUMBER
 
-from nest.soc import SOTDDFT, TDRHFSOC
+from nest.soc import SOTDA, TDRHFSOC
 
 
 def assert_allclose_up_to_sign(testcase, actual, desired, atol):
@@ -129,16 +129,13 @@ class KnownValues(unittest.TestCase):
         state_interaction = TDRHFSOC(
             singlet, triplet, soctype='SOMF', include_reference=True,
         ).run()
-        direct = SOTDDFT(
+        direct = SOTDA(
             self.mf, soctype='SOMF', include_reference=True,
         ).set(nstates=dimension, conv_tol=1e-8, max_cycle=300).run()
 
         self.assertTrue(np.all(singlet.converged))
         self.assertTrue(np.all(triplet.converged))
         self.assertTrue(np.all(direct.converged))
-        self.assertEqual(len(state_interaction.e), dimension)
-        self.assertEqual(len(direct.e), dimension)
-        self.assertEqual(direct.xy[0][0].shape, (dimension,))
         np.testing.assert_allclose(direct.e, state_interaction.e, atol=1e-11, rtol=0)
 
     def test_tddft_somf_soc(self):

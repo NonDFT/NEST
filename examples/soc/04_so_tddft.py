@@ -19,7 +19,7 @@ import numpy as np
 from pyscf import gto
 from pyscf.data.nist import HARTREE2EV
 
-from nest.soc import SOTDDFT, TDRHFSOC
+from nest.soc import SOTDA, TDRHFSOC
 
 
 mol = gto.M(
@@ -35,7 +35,7 @@ mol = gto.M(
     symmetry=False,
     verbose=0,
 )
-mf = mol.RKS(xc="PBE").set(conv_tol=1e-12).run()
+mf = mol.RKS(xc="PBE").run()
 
 nocc = np.count_nonzero(mf.mo_occ == 2)
 nvir = np.count_nonzero(mf.mo_occ == 0)
@@ -46,12 +46,8 @@ print(f"nocc={nocc}, nvir={nvir}, nov={nov}, SOC dimension={dimension}")
 # Conventional route: solve every scalar singlet and triplet TDA state, then
 # couple the complete state space with SOC.  Keeping all nov roots makes this
 # a unitary change of basis rather than a truncated state-interaction model.
-singlet = mf.TDA().set(
-    singlet=True, nstates=nov, conv_tol=1e-8, max_cycle=300,
-).run()
-triplet = mf.TDA().set(
-    singlet=False, nstates=nov, conv_tol=1e-8, max_cycle=300,
-).run()
+singlet = mf.TDA().set(singlet=True, nstates=nov, max_cycle=300).run()
+triplet = mf.TDA().set(singlet=False, nstates=nov, max_cycle=300).run()
 state_interaction = TDRHFSOC(
     singlet,
     triplet,
@@ -62,13 +58,12 @@ state_interaction = TDRHFSOC(
 # Direct route: diagonalize the complete [reference,S,T-1,T0,T+1] SOC-TDA
 # Casida matrix.  xy[root][0] is a one-dimensional complex vector of length
 # 1 + 4*nov when include_reference=True.
-direct = SOTDDFT(
+direct = SOTDA(
     mf,
     soctype="SOMF",
     include_reference=True,
 ).set(
     nstates=dimension,
-    conv_tol=1e-8,
     max_cycle=300,
 ).run()
 

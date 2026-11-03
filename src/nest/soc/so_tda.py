@@ -15,60 +15,23 @@
 
 """Direct spin-orbit-coupled TDA for a closed-shell RHF/RKS reference.
 
-The trial-vector block order is ``[S, T-1, T0, T+1]``.  If the closed-shell
+The trial-vector block order is ``[S, T-1, T0, T+1]``. If the closed-shell
 reference is included, its scalar coefficient precedes the four excitation
-blocks.  SOC is added directly to the Casida A matrix instead of coupling a
+blocks. SOC is added directly to the Casida A matrix instead of coupling a
 truncated set of previously converged spin-free states.
 """
 
 import numpy as np
 from pyscf import lib, scf
 from pyscf.lib import logger
-from pyscf.tdscf import rhf
+from pyscf.tdscf import rhf, uhf
 
 from nest._lr_eig import eigh as lr_eigh
 from nest.soc.soc_ao import get_ao_soc
 
 
-def _get_triplet_a(mf, frozen_mask):
-    """Build the closed-shell triplet TDA matrix with the SF-TDA kernel."""
-    from nest.sftda.uhf_sf import get_ab_sf
-
-    mf_sf = mf.to_uks() if isinstance(mf, scf.hf.KohnShamDFT) else mf.to_uhf()
-    mo_energy = np.asarray(mf_sf.mo_energy)[:, frozen_mask]
-    mo_coeff = np.asarray(mf_sf.mo_coeff)[:, :, frozen_mask]
-    mo_occ = np.asarray(mf_sf.mo_occ)[:, frozen_mask]
-
-    a_sf = get_ab_sf(
-        mf_sf,
-        mo_energy=mo_energy,
-        mo_coeff=mo_coeff,
-        mo_occ=mo_occ,
-        collinear_samples=1,
-    )[0][1]
-
-    # get_ab_sf uses explicit UHF/UKS Fock oo/vv blocks when alpha and beta
-    # orbitals are identical.  Replace that one-electron part with the
-    # canonical restricted orbital gaps used by RHF/RKS TDA.gen_vind.
-    occidx_a = mo_occ[0] == 1
-    viridx_b = mo_occ[1] == 0
-    orbo_a = mo_coeff[0][:, occidx_a]
-    orbv_b = mo_coeff[1][:, viridx_b]
-    fock_a, fock_b = mf_sf.get_fock()
-    fock_oo = orbo_a.conj().T @ fock_a @ orbo_a
-    fock_vv = orbv_b.conj().T @ fock_b @ orbv_b
-    nocc = fock_oo.shape[0]
-    nvir = fock_vv.shape[0]
-    fock_part = lib.einsum('ij,ab->iajb', np.eye(nocc), fock_vv)
-    fock_part -= lib.einsum('ab,ji->iajb', np.eye(nvir), fock_oo)
-
-    e_ia = mo_energy[1, viridx_b][None, :] - mo_energy[0, occidx_a][:, None]
-    orbital_gap = np.diag(e_ia.ravel()).reshape(nocc, nvir, nocc, nvir)
-    return a_sf - fock_part + orbital_gap
-
-
-class SOTDDFT(rhf.TDBase):
-    """Spin-orbit-coupled, TDA-only TDHF/TDDFT.
+class SOTDA(rhf.TDBase):
+    """Spin-orbit-coupled, TDA-only.
 
     ``xy[root]`` is stored as ``(x, 0)``, where ``x`` is a one-dimensional
     complex vector of length ``4*nocc*nvir`` or ``4*nocc*nvir + 1``.
@@ -99,11 +62,11 @@ class SOTDDFT(rhf.TDBase):
         mo_occ = np.asarray(self._scf.mo_occ)
         mo_coeff = np.asarray(self._scf.mo_coeff)
         if mo_occ.ndim != 1 or np.any((mo_occ != 0) & (mo_occ != 2)):
-            raise ValueError('SOTDDFT requires a closed-shell RHF/RKS reference')
+            raise ValueError('SO-TDA requires a closed-shell RHF/RKS reference')
         if mo_coeff.ndim != 2 or not np.isrealobj(mo_coeff):
-            raise ValueError('SOTDDFT requires real, spin-restricted MO coefficients')
+            raise ValueError('SO-TDA requires real, spin-restricted MO coefficients')
         if self.wfnsym is not None:
-            raise NotImplementedError('SOTDDFT does not support wfnsym because SOC mixes spatial irreps')
+            raise NotImplementedError('SO-TDA does not support wfnsym because SOC mixes spatial irreps')
         return self
 
     @staticmethod
@@ -118,7 +81,7 @@ class SOTDDFT(rhf.TDBase):
         if mf is None:
             mf = self._scf
         if mf is not self._scf:
-            raise ValueError('gen_vind must use the SCF object associated with SOTDDFT')
+            raise ValueError('gen_vind must use the SCF object associated with SO-TDA')
         self.check_sanity()
 
         # Reuse PySCF's complete RHF/RKS TDA response, including the canonical
@@ -238,7 +201,7 @@ class SOTDDFT(rhf.TDBase):
         return vind, hdiag
 
     def get_ab(self, mf=None):
-        """Return the complete SOC-TDA Hamiltonian in the excitation basis.
+        """Return the complete SO-TDA Hamiltonian in the excitation basis.
 
         Unlike the regular PySCF ``get_ab``, this TDA-only method returns one
         two-dimensional matrix rather than an ``(A, B)`` tuple.  Its basis is
@@ -247,7 +210,7 @@ class SOTDDFT(rhf.TDBase):
         if mf is None:
             mf = self._scf
         if mf is not self._scf:
-            raise ValueError('get_ab must use the SCF object associated with SOTDDFT')
+            raise ValueError('get_ab must use the SCF object associated with SO-TDA')
         self.check_sanity()
 
         mask = self.get_frozen_mask()
@@ -259,9 +222,13 @@ class SOTDDFT(rhf.TDBase):
         nvir = viridx.size
         nov = nocc * nvir
 
-        # PySCF's restricted get_ab constructs the singlet matrix only.
-        a_s = rhf.get_ab(mf, frozen=self.frozen)[0].reshape(nov, nov)
-        a_t = _get_triplet_a(mf, mask).reshape(nov, nov)
+        # For a restricted reference the alpha and beta orbitals coincide.
+        # Their symmetric/antisymmetric combinations give singlet/triplet A.
+        # Pass frozen separately: the XC kernel needs the full reference density.
+        mf_u = mf.to_uks() if isinstance(mf, scf.hf.KohnShamDFT) else mf.to_uhf()
+        (a_aa, a_ab, _), _ = uhf.get_ab(mf_u, frozen=self.frozen)
+        a_s = (a_aa + a_ab).reshape(nov, nov)
+        a_t = (a_aa - a_ab).reshape(nov, nov)
 
         self.soc_ao = get_ao_soc(mf, self.soctype)
         self.soc_mo = lib.einsum(
@@ -337,7 +304,7 @@ class SOTDDFT(rhf.TDBase):
         return x0
 
     def kernel(self, x0=None, nstates=None):
-        """Diagonalize the complex Hermitian SOC-TDA matrix."""
+        """Diagonalize the complex Hermitian SO-TDA matrix."""
         cpu0 = (logger.process_clock(), logger.perf_counter())
         self.check_sanity()
         self.dump_flags()
@@ -376,12 +343,12 @@ class SOTDDFT(rhf.TDBase):
             lib.chkfile.save(self.chkfile, 'tddft/e', self.e)
             lib.chkfile.save(self.chkfile, 'tddft/xy', self.xy)
 
-        log.timer('SOTDDFT', *cpu0)
+        log.timer('SO-TDA', *cpu0)
         self._finalize()
         return self.e, self.xy
 
 
-scf.hf.RHF.SOTDDFT = lib.class_as_method(SOTDDFT)
+scf.hf.RHF.SOTDA = lib.class_as_method(SOTDA)
 
 
-__all__ = ['SOTDDFT']
+__all__ = ['SOTDA']
