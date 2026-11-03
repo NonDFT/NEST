@@ -1,17 +1,7 @@
-#!/usr/bin/env python
 # Copyright 2026 The NEST Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import unittest
 import numpy as np
@@ -50,7 +40,7 @@ class KnownValues(unittest.TestCase):
 
     def test_roks_sftddft_soc(self):
         mf = self.mol.ROKS(xc='SVWN').run()
-        td = mf.SFTDDFT().set(
+        td = sftda.TDDFT_SF(mf).set(
             extype=1, collinear='mcol', collinear_samples=50, nstates=3,
         ).run()
         driver = td.SOC(soctype='SOMF')
@@ -58,13 +48,13 @@ class KnownValues(unittest.TestCase):
 
         self.assertTrue(mf.converged)
         self.assertTrue(np.all(td.converged))
-        self.assertAlmostEqual(mf.e_tot, -150.18173594947856, delta=1e-5)
+        self.assertAlmostEqual(mf.e_tot, -150.18173594947856, delta=1e-9)
         np.testing.assert_allclose(td.e, [
             -0.2107471654542317, -0.0015844442063221, 0.0245430214421581,
-        ], atol=1e-5, rtol=0)
+        ], atol=1e-8, rtol=0)
         np.testing.assert_allclose(td.spin_square(), [
             0.0011758949708333688, 2.0012261115407766, 0.034155774522082627,
-        ], atol=1e-5, rtol=0)
+        ], atol=1e-8, rtol=0)
         self.assertEqual(driver.h_soc.shape, (5, 5))
         np.testing.assert_allclose(driver.h_soc, driver.h_soc.conj().T, atol=1e-12)
         np.testing.assert_allclose((driver.e - driver.e.min()).real * HARTREE2WAVENUMBER, [
@@ -74,7 +64,7 @@ class KnownValues(unittest.TestCase):
             [0.4626543873150336 - 6.686744761741945j],
             [0.0 - 14.2382866761041j],
             [0.4626543873150336 + 6.686744761741945j],
-        ]), 1e-5)
+        ]), 1e-8)
 
     def test_uks_sftddft_soc(self):
         mf = self.mol.UKS(xc='SVWN').run()
@@ -86,13 +76,13 @@ class KnownValues(unittest.TestCase):
 
         self.assertTrue(mf.converged)
         self.assertTrue(np.all(td.converged))
-        self.assertAlmostEqual(mf.e_tot, -150.18252681880003, delta=1e-5)
+        self.assertAlmostEqual(mf.e_tot, -150.18252681880003, delta=1e-9)
         np.testing.assert_allclose(td.e, [
             -0.20907621837286508, 0.0000011484871538744751, 0.026028246454667784,
-        ], atol=1e-5, rtol=0)
+        ], atol=1e-8, rtol=0)
         np.testing.assert_allclose(td.spin_square(), [
             0.0027459512964301, 2.0084594505481292, 0.0400313245672246,
-        ], atol=1e-5, rtol=0)
+        ], atol=1e-8, rtol=0)
         self.assertEqual(driver.h_soc.shape, (5, 5))
         np.testing.assert_allclose(driver.h_soc, driver.h_soc.conj().T, atol=1e-12)
         np.testing.assert_allclose((driver.e - driver.e.min()).real * HARTREE2WAVENUMBER, [
@@ -102,7 +92,7 @@ class KnownValues(unittest.TestCase):
             [0.4709967390252593 - 6.694129899974075j],
             [0.0 - 14.1984224305132j],
             [0.4709967390252593 + 6.694129899974075j],
-        ]), 1e-5)
+        ]), 1e-8)
 
 
 if __name__ == '__main__':

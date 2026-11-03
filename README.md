@@ -21,10 +21,10 @@ It is built on top of the PySCF electronic structure package.
         │                          │                          │
         ▼                          ▼                          ▼
 Noncollinear TDDFT         Noncollinear SF-TDDFT      Noncollinear Tensor TDA
-                                   ├── Gradients            ├── Gradients (in progress)
-                                   ├── Oscillator strengths └── SOC (in progress)
-                                   ├── NADC
-                                   └── SOC
+                                   ├── Gradients            ├── Gradients
+                                   ├── Oscillator strengths ├── Oscillator strengths
+                                   ├── NADC                 ├── NADC (in progress)
+                                   └── SOC                  └── SOC
 ```
 
 ## Features
@@ -50,8 +50,11 @@ Noncollinear TDDFT         Noncollinear SF-TDDFT      Noncollinear Tensor TDA
 
   NT-TDA is a spin-consistent extension of noncollinear TDDFT that provides a unified treatment of spin-conserving and spin-flip excitations. For an open-shell reference state with total spin S, it can describe target states with total spins S−1 (except for S = 1/2), S, and S+1. All resulting states are free from spin contamination.
 
-  - Analytic gradients *(in progress)*
-  - SOC *(in progress)*
+  - Analytic gradients for ΔS = −1 and 0 on ROKS and average-occupation ROKS (AOCSCF) references
+  - Finite-difference gradients for all three spin channels
+  - Oscillator strengths
+  - NADC *(in progress)*
+  - SOC
 
 
 ## Authors
@@ -84,7 +87,7 @@ Benchmark calculations and validation.
 | Noncollinear DFT | Zhichen Pu, Qiming Sun |
 | Noncollinear TDDFT | Hao Li, Qiming Sun |
 | Noncollinear SF-TDA / SF-TDDFT | Hao Li, Tai Wang |
-| Analytic Nuclear Gradients | Hao Li, Tai Wang |
+| Analytic Nuclear Gradients | Hao Li, Tai Wang, Yu Jing |
 | Analytic Nonadiabatic Derivative Couplings (NADC) | Yu Jing, Tai Wang |
 | Oscillator Strengths | Tai Wang |
 | Noncollinear Tensor TDA (NT-TDA) | Tai Wang, Wenxian Qin |
@@ -149,4 +152,4 @@ If you use NEST in your research, please cite the relevant publication(s) listed
 
 ### Noncollinear Tensor TDA (NT-TDA)
 
-- NT-TDA (https://arxiv.org/abs/2607.19933, 2026)
+- NT-TDA (JCTC, 2026) https://doi.org/10.1021/acs.jctc.6c01470

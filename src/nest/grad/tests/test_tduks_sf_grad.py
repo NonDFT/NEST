@@ -18,6 +18,11 @@ import numpy as np
 from pyscf import gto
 from nest import sftda
 
+try:
+    from pyscf.dispersion import dftd3, dftd4
+except ImportError:
+    dftd3 = dftd4 = None
+
 
 def cal_exact_sf_tda_gradient(mf, extype=1, collinear='mcol', collinear_samples=20, state=1):
     a, b = sftda.uhf_sf.get_ab_sf(mf, collinear=collinear, collinear_samples=collinear_samples)
@@ -233,6 +238,67 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(abs(grad_exact - ref).max(), 0, delta=1e-5)
         self.assertAlmostEqual(abs(grad_iter - ref).max(), 0, delta=1e-5)
 
+
+    @unittest.skipIf(dftd3 is None, 'pyscf-dispersion is not installed')
+    def test_col_d3bj(self):
+        mf = self.mol.UKS(xc='PBE').run()
+        td = mf.SFTDA().set(nstates=2, collinear='col').run()
+        roots = td.e.copy()
+        energies = td.e_tot.copy()
+        grad = td.Gradients().kernel(state=1)
+
+        mf.disp = 'd3bj'
+        mf.e_tot = mf.energy_tot()
+        td.run()
+        disp_energy = mf.get_dispersion()
+        disp_grad = mf.nuc_grad_method().get_dispersion()
+        self.assertAlmostEqual(abs(td.e - roots).max(), 0, delta=1e-6)
+        self.assertAlmostEqual(abs(td.e_tot - energies - disp_energy).max(), 0, delta=1e-6)
+        corrected = td.Gradients().kernel(state=1)
+        self.assertAlmostEqual(abs(corrected - grad - disp_grad).max(), 0, delta=1e-6)
+
+    @unittest.skipIf(dftd4 is None, 'pyscf-dispersion is not installed')
+    def test_mcol_d4(self):
+        mf = self.mol.UKS(xc='PBE').run()
+        td = mf.SFTDA().set(nstates=2, collinear='mcol').run()
+        roots = td.e.copy()
+        energies = td.e_tot.copy()
+        grad = td.Gradients().kernel(state=1)
+
+        mf.disp = 'd4'
+        mf.e_tot = mf.energy_tot()
+        td.run()
+        disp_energy = mf.get_dispersion()
+        disp_grad = mf.nuc_grad_method().get_dispersion()
+        self.assertAlmostEqual(abs(td.e - roots).max(), 0, delta=1e-6)
+        self.assertAlmostEqual(abs(td.e_tot - energies - disp_energy).max(), 0, delta=1e-6)
+        corrected = td.Gradients().kernel(state=1)
+        self.assertAlmostEqual(abs(corrected - grad - disp_grad).max(), 0, delta=1e-6)
+
+    @unittest.skipIf(dftd4 is None, 'pyscf-dispersion is not installed')
+    def test_d4_gradient_scanner(self):
+        # Finite differences require tightly converged energies at both geometries.
+        mf = self.mol.UKS(xc='PBE').set(disp='d4', conv_tol=1e-14, conv_tol_grad=1e-9)
+        mf.grids.level = 4
+        mf.run()
+        td = mf.SFTDA().set(nstates=1, collinear='col', conv_tol=1e-9).run()
+        grad = td.Gradients().kernel(state=1)
+        scanner = td.Gradients().as_scanner(state=1)
+        energy, scanner_grad = scanner(self.mol)
+        self.assertTrue(scanner.converged)
+        self.assertAlmostEqual(energy, td.e_tot[0], delta=1e-6)
+        self.assertAlmostEqual(abs(scanner_grad - grad).max(), 0, delta=1e-6)
+
+        # Differentiate the corrected total energy along one nuclear coordinate.
+        step = 1e-3  # Bohr
+        coords = self.mol.atom_coords()
+        coords[1, 1] += step
+        e_plus = scanner(self.mol.set_geom_(coords, unit='Bohr', inplace=False))[0]
+        coords[1, 1] -= 2 * step
+        e_minus = scanner(self.mol.set_geom_(coords, unit='Bohr', inplace=False))[0]
+        derivative = (e_plus - e_minus) / (2 * step)
+        # Allow finite-difference and numerical integration errors, in Hartree/Bohr.
+        self.assertAlmostEqual(derivative, grad[1, 1], delta=1e-5)
 
 if __name__ == '__main__':
     print('Full tests for SF-TDA and SF-TDDFT analytic gradients')

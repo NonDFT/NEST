@@ -97,12 +97,38 @@ class KnownValues(unittest.TestCase):
         self.assertEqual(h_direct.shape, (4 * self.nov, 4 * self.nov))
         np.testing.assert_allclose(h_direct, h_direct.conj().T, atol=1e-12, rtol=0)
 
+    def test_get_ab_matches_vind_for_random_complex_vector(self):
+        rng = np.random.default_rng(12)
+        cases = ((False, None), (True, None), (True, 1))
+        for include_reference, frozen in cases:
+            td = SOTDDFT(
+                self.mf, soctype='1e', include_reference=include_reference, frozen=frozen,
+            )
+            hamiltonian = td.get_ab()
+            vector = rng.standard_normal(hamiltonian.shape[0])
+            vector = vector + 1j * rng.standard_normal(hamiltonian.shape[0])
+            vind, _ = td.gen_vind()
+            error = vind(vector)[0] - hamiltonian.dot(vector)
+
+            np.testing.assert_allclose(hamiltonian, hamiltonian.conj().T, atol=1e-12, rtol=0)
+            self.assertLess(np.linalg.norm(error), 1e-12)
+            self.assertLess(np.max(np.abs(error)), 1e-12)
+
     def test_rks_response_accepts_complex_trials(self):
         mf = dft.RKS(self.mol, xc='lda,vwn').run(conv_tol=1e-12)
         td = SOTDDFT(mf, soctype='1e', include_reference=True)
         h_direct = self._dense_matrix(td)
+        hamiltonian = td.get_ab()
+        rng = np.random.default_rng(21)
+        vector = rng.standard_normal(hamiltonian.shape[0])
+        vector = vector + 1j * rng.standard_normal(hamiltonian.shape[0])
+        vind, _ = td.gen_vind()
+        error = vind(vector)[0] - hamiltonian.dot(vector)
+
         self.assertTrue(np.iscomplexobj(h_direct))
         np.testing.assert_allclose(h_direct, h_direct.conj().T, atol=1e-10, rtol=0)
+        self.assertLess(np.linalg.norm(error), 1e-12)
+        self.assertLess(np.max(np.abs(error)), 1e-12)
 
 
 if __name__ == '__main__':

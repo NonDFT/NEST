@@ -357,11 +357,78 @@ def _contract_xc_kernel(td_grad, xc_code, dmvo, dmoo=None, with_vxc=True, with_k
     return f1vo, f1oo, v1ao, k1ao
 
 
+class TDSCF_GradScanner(tdrhf_grad.TDSCF_GradScanner):
+    @property
+    def converged(self):
+        return self.base._scf.converged and self.base.converged[self.state - 1]
+
+
 class Gradients(tdrhf_grad.Gradients):
     cphf_max_cycle = tdrhf_grad.Gradients.cphf_max_cycle + 20
 
+    def as_scanner(self, state=1):
+        if isinstance(self, lib.GradScanner):
+            return self
+        if state == 0:
+            return self.base._scf.nuc_grad_method().as_scanner()
+        name = self.__class__.__name__ + TDSCF_GradScanner.__name_mixin__
+        return lib.set_class(TDSCF_GradScanner(self, state),
+                             (TDSCF_GradScanner, self.__class__), name)
+
     @lib.with_doc(grad_elec.__doc__)
-    def grad_elec(self, xy, singlet=None, atmlst=None):
+    def grad_elec(self, xy, atmlst=None):
         return grad_elec(self, xy, atmlst, self.max_memory, self.verbose)
+
+    def dump_flags(self, verbose=None):
+        super().dump_flags(verbose)
+        log = logger.new_logger(self, verbose)
+        td = self.base
+        log.info('extype = %s', td.extype)
+        log.info('collinear = %s', td.collinear)
+        if td.collinear == 'mcol':
+            log.info('collinear_samples = %s', td.collinear_samples)
+        mf = td._scf
+        log.info('dispersion = %s', (mf.disp or mf.xc) if mf.do_disp() else False)
+        return self
+
+    def kernel(self, xy=None, state=None, atmlst=None):
+        """Rewrite the `kernel` method to include the reference's D3/D4 correction."""
+        if xy is None:
+            if state is None:
+                state = self.state
+            else:
+                self.state = state
+            if state == 0:
+                logger.warn(self, 'state=0: computing the SCF reference gradient.')
+                # The SCF gradient kernel already includes dispersion.
+                return self.base._scf.nuc_grad_method().kernel(atmlst=atmlst)
+
+        if xy is None:
+            if self.base.xy is None:
+                self.base.run()
+            xy = self.base.xy[state - 1]
+
+        if atmlst is None:
+            atmlst = self.atmlst
+        else:
+            self.atmlst = atmlst
+
+        if self.verbose >= logger.WARN:
+            self.check_sanity()
+        if self.verbose >= logger.INFO:
+            self.dump_flags()
+
+        de = self.grad_elec(xy, atmlst)
+        self.de = de + self.grad_nuc(atmlst=atmlst)
+        if self.mol.symmetry:
+            self.de = self.symmetrize(self.de, atmlst)
+        mf = self.base._scf
+        if mf.do_disp():
+            dispersion = mf.nuc_grad_method().get_dispersion()
+            if atmlst is not None:
+                dispersion = dispersion[np.asarray(atmlst, dtype=int)]
+            self.de += dispersion
+        self._finalize()
+        return self.de
 
 Grad = Gradients

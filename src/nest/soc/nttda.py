@@ -19,7 +19,7 @@ import numpy as np
 from pyscf import lib
 from pyscf.lib import logger
 
-from nest.nttda.nttda import _sc_vector_slices
+from nest.nttda.nttda import _unpack_amplitudes
 from nest.soc.soc import SOCBase, SpinFreeState, clebsch_gordan_rank1
 
 
@@ -120,13 +120,36 @@ class SOC(SOCBase):
             spin = reference_spin + delta_s
             if spin < 0:
                 raise ValueError('Invalid final spin inferred from deltaS')
+
+            mask = tdobj.get_frozen_mask()
+            active_c, active_v = mask[cidx], mask[vidx]
+            nc_active = np.count_nonzero(active_c)
+            nv_active = np.count_nonzero(active_v)
             for root, energy in enumerate(tdobj.e):
+                co, cv, oo, ov, cv0 = _unpack_amplitudes(tdobj, root, nc_active, no, nv_active)
+                # SOC couples states with different frozen selections in one
+                # common MO space. Fill the excluded amplitudes with zero.
+                if nc_active != nc or nv_active != nv:
+                    full_cv = np.zeros((nc, nv), dtype=cv.dtype)
+                    full_cv[np.ix_(active_c, active_v)] = cv
+                    cv = full_cv
+                    if delta_s != 1:
+                        full_co = np.zeros((nc, no), dtype=co.dtype)
+                        full_co[active_c] = co
+                        full_ov = np.zeros((no, nv), dtype=ov.dtype)
+                        full_ov[:, active_v] = ov
+                        co, ov = full_co, full_ov
+                    if delta_s == 0:
+                        full_cv0 = np.zeros((nc, nv), dtype=cv0.dtype)
+                        full_cv0[np.ix_(active_c, active_v)] = cv0
+                        cv0 = full_cv0
+
                 if delta_s == 1:
-                    amplitude = self._unpack_deltap1(tdobj, root, nc, nv)
+                    amplitude = cv
                 elif delta_s == 0:
-                    amplitude = self._unpack_delta0(tdobj, root, nc, no, nv)
+                    amplitude = oo, co, cv, ov, cv0
                 else:
-                    amplitude = self._unpack_deltam1(tdobj, root, nc, no, nv)
+                    amplitude = co, cv, oo, ov
                 assert all(np.isrealobj(block) for block in amplitude), 'NTTDA SOC requires real amplitudes'
                 states.append(SpinFreeState(
                     source=tdobj,
@@ -155,27 +178,6 @@ class SOC(SOCBase):
                 delta_s=0,
             ))
         return states, has_delta0
-
-    @staticmethod
-    def _unpack_deltap1(tdobj, root, nc, nv):
-        return tdobj.xy[root][0].reshape(nc, nv)
-
-    @staticmethod
-    def _unpack_delta0(tdobj, root, nc, no, nv):
-        slices = _sc_vector_slices(nc, no, nv)
-        x = tdobj.xy[root][0].reshape(-1)
-        return (
-            x[slices['OO(1)']][0],
-            x[slices['CO(1)']].reshape(nc, no),
-            x[slices['CV(1)']].reshape(nc, nv),
-            x[slices['OV(1)']].reshape(no, nv),
-            x[slices['CV(0)']].reshape(nc, nv),
-        )
-
-    @staticmethod
-    def _unpack_deltam1(tdobj, root, nc, no, nv):
-        x = tdobj.xy[root][0].reshape(nc + no, no + nv)
-        return x[:nc, :no], x[:nc, no:], x[nc:, :no], x[nc:, no:]
 
     @staticmethod
     def _add(gamma, rows, cols, block):

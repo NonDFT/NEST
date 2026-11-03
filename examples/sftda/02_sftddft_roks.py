@@ -16,8 +16,9 @@
 '''
 Spin-flip TDDFT/TDA examples with ROKS reference.
 
-nest.sftda.SFTDDFT/SFTDA can also be applied to ROKS objects,
-or equivalently to mf.to_uks() objects with methods.
+ROKS and UKS share the mf.SFTDDFT()/mf.SFTDA() interface.
+The nest.sftda.SFTDDFT(mf)/SFTDA(mf) function interface is also available.
+Spin-flip TDDFT gradients for RO references are NOT implemented.
 '''
 
 import numpy as np
@@ -43,7 +44,7 @@ mf.analyze()
 
 # Spin-flip down TDDFT
 print_header("CALCULATION 1: Spin-Flip-Down TDDFT")
-sfd_tddft = sftda.SFTDDFT(mf)  # same as mf.to_uks().SFTDDFT()
+sfd_tddft = mf.SFTDDFT()
 sfd_tddft.nstates = 5
 sfd_tddft.extype = 1  # 1 for spin-flip-down excitations
 sfd_tddft.collinear_samples = 20
@@ -89,7 +90,7 @@ fake_td.analyze()
 
 # Spin-flip down TDA
 print_header("CALCULATION 2: Spin-Flip-Down TDA")
-sfd_tda = sftda.SFTDA(mf)  # same as mf.to_uks().SFTDA()
+sfd_tda = mf.SFTDA()
 sfd_tda.extype = 1
 sfd_tda.nstates = 5
 sfd_tda.collinear = 'col'  # Use collinear functional

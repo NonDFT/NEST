@@ -27,6 +27,10 @@ def assert_allclose_up_to_sign(testcase, actual, desired, atol):
         np.testing.assert_allclose(actual, -desired, atol=atol, rtol=0, err_msg=str(error))
 
 
+# Block oracles: pre-migration NEST 50600f7, conv_tol=1e-9, lindep=1e-20.
+# The deltaS=0/-1 blocks also agree with Forge c734252 at these settings.
+# Tests use conv_tol=1e-6 and the default lindep. Allow 1e-4 cm^-1 for
+# SOC blocks, matching the spectrum tolerance and finite-residual amplitudes.
 class KnownValues(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -50,7 +54,7 @@ class KnownValues(unittest.TestCase):
 
     def test_deltam1_soc_with_reference(self):
         mf = self.mol.ROKS(xc='SVWN').run()
-        tdm1 = nttda.NTTDA(mf).set(deltaS=-1, nstates=2, verbose=0).run()
+        tdm1 = nttda.NTTDA(mf).set(deltaS=-1, nstates=2, conv_tol=1e-6, verbose=0).run()
         driver = tdm1.SOC(soctype='SOMF')
         driver.include_reference = True
         driver.run()
@@ -79,18 +83,18 @@ class KnownValues(unittest.TestCase):
             self,
             driver.get_block(0, 1) * HARTREE2WAVENUMBER,
             np.array([
-                [-0.6200496897328874 + 6.674778072441238j],
-                [0.0 + 14.033973737433145j],
-                [-0.6200496897328874 - 6.674778072441238j],
+                [-0.6199710407236575 + 6.674821055129454j],
+                [0.0 + 14.033997253036391j],
+                [-0.6199710407236575 - 6.674821055129454j],
             ]),
-            1e-5,
+            1e-4,
         )
 
     def test_all_delta_s_soc_without_reference(self):
         mf = self.mol.ROKS(xc='SVWN').run()
-        td0 = nttda.NTTDA(mf).set(deltaS=0, nstates=1, verbose=0).run()
-        tdm1 = nttda.NTTDA(mf).set(deltaS=-1, nstates=2, verbose=0).run()
-        tdp1 = nttda.NTTDA(mf).set(deltaS=1, nstates=2, verbose=0).run()
+        td0 = nttda.NTTDA(mf).set(deltaS=0, nstates=1, conv_tol=1e-6, verbose=0).run()
+        tdm1 = nttda.NTTDA(mf).set(deltaS=-1, nstates=2, conv_tol=1e-6, verbose=0).run()
+        tdp1 = nttda.NTTDA(mf).set(deltaS=1, nstates=2, conv_tol=1e-6, verbose=0).run()
         driver = td0.SOC(tdm1, tdp1, soctype='SOMF', include_reference=False).run()
 
         self.assertTrue(mf.converged)
@@ -137,43 +141,96 @@ class KnownValues(unittest.TestCase):
             self,
             driver.get_block(0, 1) * HARTREE2WAVENUMBER,
             np.array([
-                [-0.6013835340881171 + 6.509518824543219j],
-                [0.0 + 14.124330522021628j],
-                [-0.6013835340881171 - 6.509518824543219j],
+                [-0.6015220110331332 + 6.509418687890437j],
+                [0.0 + 14.124387469862722j],
+                [-0.6015220110331332 - 6.509418687890437j],
             ]),
-            1e-5,
+            1e-4,
         )
         assert_allclose_up_to_sign(
             self,
             driver.get_block(3, 0) * HARTREE2WAVENUMBER,
             np.array([
-                [4.291356376707217 + 0.8683742423491343j, 0.0, 0.0],
-                [22.058947162257795j, 3.034447194457806 + 0.6140333153728034j, 0.0],
-                [1.751938904561919 - 0.3545122999218864j, 25.47147816433854j,
-                 1.751938904561919 + 0.3545122999218864j],
-                [0.0, 3.034447194457806 - 0.6140333153728034j, 22.058947162257795j],
-                [0.0, 0.0, 4.291356376707217 - 0.8683742423491343j],
+                [4.2913325370775794 + 0.8682679288519188j, 0.0, 0.0],
+                [22.058932205004297j, 3.034430337294028 + 0.6139581403779906j, 0.0],
+                [1.7519291720738737 - 0.3544688976183949j, 25.471460893189867j,
+                 1.7519291720738737 + 0.3544688976183949j],
+                [0.0, 3.034430337294028 - 0.6139581403779906j, 22.058932205004297j],
+                [0.0, 0.0, 4.2913325370775794 - 0.8682679288519188j],
             ]),
-            1e-5,
+            1e-4,
         )
         assert_allclose_up_to_sign(
             self,
             driver.get_block(4, 3) * HARTREE2WAVENUMBER,
             np.array([
-                [3.7686984455282424j, -4.890015722888963 - 1.4176754459558178j,
+                [3.7688365689592516j, -4.890028104859523 - 1.417702865769535j,
                  0.0, 0.0, 0.0],
-                [4.890015722888963 - 1.4176754459558178j, 1.8843492227641212j,
-                 -5.989021677632492 - 1.7362907317321719j, 0.0, 0.0],
-                [0.0, 5.989021677632492 - 1.7362907317321719j, 0.0,
-                 -5.989021677632492 - 1.7362907317321719j, 0.0],
-                [0.0, 0.0, 5.989021677632492 - 1.7362907317321719j,
-                 -1.8843492227641212j, -4.890015722888963 - 1.4176754459558178j],
-                [0.0, 0.0, 0.0, 4.890015722888963 - 1.4176754459558178j,
-                 -3.7686984455282424j],
+                [4.890028104859523 - 1.417702865769535j, 1.8844182844796258j,
+                 -5.989036842387433 - 1.7363243140083964j, 0.0, 0.0],
+                [0.0, 5.989036842387433 - 1.7363243140083964j, 0.0,
+                 -5.989036842387433 - 1.7363243140083964j, 0.0],
+                [0.0, 0.0, 5.989036842387433 - 1.7363243140083964j,
+                 -1.8844182844796258j, -4.890028104859523 - 1.417702865769535j],
+                [0.0, 0.0, 0.0, 4.890028104859523 - 1.417702865769535j,
+                 -3.7688365689592516j],
             ]),
-            1e-5,
+            1e-4,
         )
         np.testing.assert_array_equal(driver.get_block(3, 1), np.zeros((5, 1)))
+
+    def test_frozen_orbitals_soc(self):
+        mf = self.mol.ROKS(xc='SVWN').run()
+        self.assertTrue(mf.converged)
+        # Different active spaces must map to the same MO indices in SOC.
+        # Indices 0 and 1 are O 1s orbitals; -1 is the last virtual orbital.
+        # SOC block comparisons below use an absolute tolerance of 5e-4 cm^-1.
+        td0 = mf.NTTDA(frozen=[1, -1]).set(deltaS=0, nstates=1).run()
+        tdm1 = mf.NTTDA(frozen=2).set(deltaS=-1, nstates=2).run()
+        tdp1 = mf.NTTDA(frozen=[0, 1, -1]).set(deltaS=1, nstates=2).run()
+        self.assertTrue(np.all(td0.converged))
+        self.assertTrue(np.all(tdm1.converged))
+        self.assertTrue(np.all(tdp1.converged))
+        driver = td0.SOC(tdm1, tdp1).run()
+
+        # Checked against the same states expressed in the full MO space with frozen amplitudes zero.
+        self.assertEqual(driver.h_soc.shape, (15, 15))
+        np.testing.assert_allclose(driver.h_soc, driver.h_soc.conj().T, atol=1e-12)
+        np.testing.assert_allclose(
+            (driver.e - driver.e.min()).real * HARTREE2WAVENUMBER,
+            [
+                0.0, 46164.68856840081, 46164.69181457587,
+                46164.6955945347, 51523.198885706006,
+                103996.00078162245, 103996.00113195438, 103996.00975253736,
+                103996.01364846418, 103996.01557368443,
+                115527.50910087393, 115527.51055398698, 115527.51500579911,
+                115527.52231741096, 115527.52281725402,
+            ],
+            atol=1e-4, rtol=0,
+        )
+        assert_allclose_up_to_sign(
+            self,
+            driver.get_block(0, 1) * HARTREE2WAVENUMBER,
+            np.array([
+                [-0.599093134478 + 6.502456992965j],
+                [14.12343230699j],
+                [-0.599093134478 - 6.502456992965j],
+            ]),
+            5e-4,
+        )
+        assert_allclose_up_to_sign(
+            self,
+            driver.get_block(3, 0) * HARTREE2WAVENUMBER,
+            np.array([
+                [4.287950791358 + 0.861718813093j, 0.0, 0.0],
+                [22.067008877245j, 3.032039081964 + 0.609327216214j, 0.0],
+                [1.750548580165 - 0.351795232306j, 25.480787030975j,
+                 1.750548580165 + 0.351795232306j],
+                [0.0, 3.032039081964 - 0.609327216214j, 22.067008877245j],
+                [0.0, 0.0, 4.287950791358 - 0.861718813093j],
+            ]),
+            5e-4,
+        )
 
 
 if __name__ == '__main__':

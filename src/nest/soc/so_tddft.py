@@ -30,6 +30,43 @@ from nest._lr_eig import eigh as lr_eigh
 from nest.soc.soc_ao import get_ao_soc
 
 
+def _get_triplet_a(mf, frozen_mask):
+    """Build the closed-shell triplet TDA matrix with the SF-TDA kernel."""
+    from nest.sftda.uhf_sf import get_ab_sf
+
+    mf_sf = mf.to_uks() if isinstance(mf, scf.hf.KohnShamDFT) else mf.to_uhf()
+    mo_energy = np.asarray(mf_sf.mo_energy)[:, frozen_mask]
+    mo_coeff = np.asarray(mf_sf.mo_coeff)[:, :, frozen_mask]
+    mo_occ = np.asarray(mf_sf.mo_occ)[:, frozen_mask]
+
+    a_sf = get_ab_sf(
+        mf_sf,
+        mo_energy=mo_energy,
+        mo_coeff=mo_coeff,
+        mo_occ=mo_occ,
+        collinear_samples=1,
+    )[0][1]
+
+    # get_ab_sf uses explicit UHF/UKS Fock oo/vv blocks when alpha and beta
+    # orbitals are identical.  Replace that one-electron part with the
+    # canonical restricted orbital gaps used by RHF/RKS TDA.gen_vind.
+    occidx_a = mo_occ[0] == 1
+    viridx_b = mo_occ[1] == 0
+    orbo_a = mo_coeff[0][:, occidx_a]
+    orbv_b = mo_coeff[1][:, viridx_b]
+    fock_a, fock_b = mf_sf.get_fock()
+    fock_oo = orbo_a.conj().T @ fock_a @ orbo_a
+    fock_vv = orbv_b.conj().T @ fock_b @ orbv_b
+    nocc = fock_oo.shape[0]
+    nvir = fock_vv.shape[0]
+    fock_part = lib.einsum('ij,ab->iajb', np.eye(nocc), fock_vv)
+    fock_part -= lib.einsum('ab,ji->iajb', np.eye(nvir), fock_oo)
+
+    e_ia = mo_energy[1, viridx_b][None, :] - mo_energy[0, occidx_a][:, None]
+    orbital_gap = np.diag(e_ia.ravel()).reshape(nocc, nvir, nocc, nvir)
+    return a_sf - fock_part + orbital_gap
+
+
 class SOTDDFT(rhf.TDBase):
     """Spin-orbit-coupled, TDA-only TDHF/TDDFT.
 
@@ -199,6 +236,90 @@ class SOTDDFT(rhf.TDBase):
         if self.include_reference:
             hdiag = np.concatenate((np.zeros(1, dtype=np.complex128), hdiag))
         return vind, hdiag
+
+    def get_ab(self, mf=None):
+        """Return the complete SOC-TDA Hamiltonian in the excitation basis.
+
+        Unlike the regular PySCF ``get_ab``, this TDA-only method returns one
+        two-dimensional matrix rather than an ``(A, B)`` tuple.  Its basis is
+        ``[reference?, S, T-1, T0, T+1]``.
+        """
+        if mf is None:
+            mf = self._scf
+        if mf is not self._scf:
+            raise ValueError('get_ab must use the SCF object associated with SOTDDFT')
+        self.check_sanity()
+
+        mask = self.get_frozen_mask()
+        mo_coeff = np.asarray(mf.mo_coeff)[:, mask]
+        mo_occ = np.asarray(mf.mo_occ)[mask]
+        occidx = np.where(mo_occ == 2)[0]
+        viridx = np.where(mo_occ == 0)[0]
+        nocc = occidx.size
+        nvir = viridx.size
+        nov = nocc * nvir
+
+        # PySCF's restricted get_ab constructs the singlet matrix only.
+        a_s = rhf.get_ab(mf, frozen=self.frozen)[0].reshape(nov, nov)
+        a_t = _get_triplet_a(mf, mask).reshape(nov, nov)
+
+        self.soc_ao = get_ao_soc(mf, self.soctype)
+        self.soc_mo = lib.einsum(
+            'up,xuv,vq->xpq', mo_coeff.conj(), self.soc_ao, mo_coeff, optimize=True,
+        )
+        z_minus = 2 * self.soc_mo[0]  # zx - i zy
+        z_z = np.sqrt(2) * self.soc_mo[1]  # zz
+        z_plus = -2 * self.soc_mo[2]  # zx + i zy
+
+        eye_occ = np.eye(nocc)
+        eye_vir = np.eye(nvir)
+
+        def one_body_matrix(z, hole_sign):
+            z_oo = z[np.ix_(occidx, occidx)]
+            z_vv = z[np.ix_(viridx, viridx)]
+            matrix = lib.einsum('ij,ab->iajb', eye_occ, z_vv)
+            matrix += hole_sign * lib.einsum('ab,ji->iajb', eye_vir, z_oo)
+            return matrix.reshape(nov, nov)
+
+        d_minus = one_body_matrix(z_minus, -1)
+        d_z = one_body_matrix(z_z, -1)
+        d_plus = one_body_matrix(z_plus, -1)
+        q_minus = one_body_matrix(z_minus, 1)
+        q_z = one_body_matrix(z_z, 1)
+        q_plus = one_body_matrix(z_plus, 1)
+
+        offset = int(self.include_reference)
+        hamiltonian = np.zeros((offset + 4 * nov, offset + 4 * nov), dtype=np.complex128)
+        block = [slice(offset + k * nov, offset + (k + 1) * nov) for k in range(4)]  #  [ref, S, T-1, T0, T+1]
+        hamiltonian[block[0], block[0]] = a_s
+        hamiltonian[block[1], block[1]] = a_t - q_z / 2
+        hamiltonian[block[2], block[2]] = a_t
+        hamiltonian[block[3], block[3]] = a_t + q_z / 2
+
+        hamiltonian[block[0], block[1]] = d_minus / np.sqrt(8)
+        hamiltonian[block[1], block[0]] = d_plus / np.sqrt(8)
+        hamiltonian[block[0], block[2]] = d_z / 2
+        hamiltonian[block[2], block[0]] = d_z / 2
+        hamiltonian[block[0], block[3]] = -d_plus / np.sqrt(8)
+        hamiltonian[block[3], block[0]] = -d_minus / np.sqrt(8)
+        hamiltonian[block[1], block[2]] = q_plus / np.sqrt(8)
+        hamiltonian[block[2], block[1]] = q_minus / np.sqrt(8)
+        hamiltonian[block[2], block[3]] = q_plus / np.sqrt(8)
+        hamiltonian[block[3], block[2]] = q_minus / np.sqrt(8)
+
+        if self.include_reference:
+            z_minus_vo = z_minus[np.ix_(viridx, occidx)].T.reshape(-1)
+            z_z_vo = z_z[np.ix_(viridx, occidx)].T.reshape(-1)
+            z_plus_vo = z_plus[np.ix_(viridx, occidx)].T.reshape(-1)
+            reference_coupling = np.concatenate((
+                np.zeros(nov, dtype=np.complex128),
+                0.5 * z_plus_vo,
+                z_z_vo / np.sqrt(2),
+                -0.5 * z_minus_vo,
+            ))
+            hamiltonian[1:, 0] = reference_coupling
+            hamiltonian[0, 1:] = reference_coupling.conj()
+        return hamiltonian
 
     def get_init_guess(self, hdiag, nstates=None):
         """Return Koopmans guesses, retaining all states at the cutoff degeneracy."""

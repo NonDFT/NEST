@@ -34,7 +34,7 @@ mol = gto.M(
 # 1. Spin-restricted high-spin scalar reference.
 mf = mol.ROKS(xc="SVWN").run()
 
-# 2. NTTDA states in the two currently supported spin sectors.
+# 2. NTTDA states in two spin sectors (deltaS=+1 is also supported).
 td0 = mf.NTTDA().set(deltaS=0, nstates=1).run()
 tdm1 = mf.NTTDA().set(deltaS=-1, nstates=2).run()
 

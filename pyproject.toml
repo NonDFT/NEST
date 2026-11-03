@@ -13,6 +13,8 @@ license-files = ["LICENSE"]
 dependencies = [
     "mcfun>=0.2.6",
     "pyscf>=2.13.0",
+    "pyscf-dispersion",
+    "geometric",
     "numpy",
     "scipy",
 ]
