@@ -54,7 +54,8 @@ class NTTDAGradientAcceptance(unittest.TestCase):
         tdobj = NTTDA(mf).set(
             deltaS=delta_s,
             nobeta=nobeta,
-            nstates=3,
+            nstates=(np.count_nonzero(mf.mo_occ == 2) * np.count_nonzero(mf.mo_occ == 0)
+                     if delta_s == 1 else 3),
             conv_tol=1e-9,
             lindep=1e-20,
             max_cycle=200,
@@ -100,19 +101,69 @@ class NTTDAGradientAcceptance(unittest.TestCase):
                     xc, delta_s=-1, nobeta=nobeta, threshold=1e-5,
                 )
 
-    def test_delta_s_plus_one_rejects_analytic_and_keeps_finite_difference(self):
-        tdobj = self.make_td("HF", delta_s=1)
-        gradient = tdobj.Gradients().set(verbose=0)
-        with self.assertRaisesRegex(NotImplementedError, "deltaS=1"):
-            gradient.kernel(state=1, method="analytic")
-        finite_difference = gradient.kernel(
-            state=1,
-            atmlst=[0],
-            method="finite_diff",
-            step=1e-3,
+    def test_delta_s_plus_one_hf_lda_gga_mgga_hybrid_and_rsh(self):
+        cases = (
+            ("HF", False),
+            ("SVWN", False),
+            ("PBE", False),
+            ("TPSS", False),
+            ("M06-2X", False),
+            ("M06-2X", True),
+            ("CAM-B3LYP", False),
+            ("CAM-B3LYP", True),
         )
-        self.assertTrue(np.all(np.isfinite(finite_difference)))
+        for xc, nobeta in cases:
+            with self.subTest(xc=xc, nobeta=nobeta):
+                self.compare_public_gradient(
+                    xc, delta_s=1, nobeta=nobeta, threshold=1e-5,
+                )
 
+    def test_delta_s_plus_one_closed_shell_to_triplet(self):
+        mol = gto.M(
+            atom="Li 0 0 0; H 0 0 1.60",
+            basis="sto-3g",
+            spin=0,
+            unit="Bohr",
+            verbose=0,
+        )
+        for xc in ("HF", "PBE"):
+            with self.subTest(xc=xc):
+                mf = dft.ROKS(mol).set(
+                    xc=xc,
+                    conv_tol=1e-13,
+                    conv_tol_grad=1e-10,
+                    max_cycle=200,
+                    verbose=0,
+                )
+                mf.grids.level = 0
+                mf.kernel()
+                self.assertTrue(mf.converged)
+                # Resolve the complete small space, including displaced roots.
+                nstates = np.count_nonzero(mf.mo_occ == 2) * np.count_nonzero(mf.mo_occ == 0)
+                tdobj = NTTDA(mf).set(
+                    deltaS=1,
+                    nstates=nstates,
+                    conv_tol=1e-10,
+                    max_cycle=200,
+                    verbose=0,
+                ).run()
+                gradient = tdobj.Gradients().set(
+                    verbose=0,
+                    fixed_grid=True,
+                    cphf_conv_tol=1e-10,
+                )
+                analytic = gradient.kernel(
+                    state=1, atmlst=[0], method="analytic",
+                )
+                finite_difference = gradient.kernel(
+                    state=1,
+                    atmlst=[0],
+                    method="finite_diff",
+                    step=2e-4,
+                )
+                np.testing.assert_allclose(
+                    analytic, finite_difference, atol=1e-6, rtol=0,
+                )
 
 if __name__ == "__main__":
     unittest.main()

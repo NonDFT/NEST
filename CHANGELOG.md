@@ -1,3 +1,7 @@
+## v0.2.0 (2026-11-25)
+
+- Add analytic NT-TDA spin-raising (ΔS = +1) gradients for ROKS and AOCSCF references.
+
 ## v0.1.0 (2026-07-10)
 
 ### Added

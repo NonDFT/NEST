@@ -23,7 +23,7 @@ from pyscf.lib import logger
 from nest.nttda import NTTDA
 from nest.nttda.nttda import _orbital_indices, _unpack_amplitudes
 
-from . import delta_s_minus_one, delta_s_zero
+from . import delta_s_minus_one, delta_s_zero, delta_s_plus_one
 
 
 
@@ -164,13 +164,9 @@ class Gradients(rhf_grad.GradientsBase):
 
     def grad_nuc(self, atmlst=None):
         """Ground-state reference gradient, including nuclear repulsion."""
-        if atmlst is not None:
-            atmlst = list(atmlst)
-        reference_gradient = self.base._scf.nuc_grad_method()
-        if self.mol.symmetry:
-            de = reference_gradient.kernel()
-            return de if atmlst is None else de[atmlst]
-        return reference_gradient.kernel(atmlst=atmlst)
+        # Select after evaluation for symmetry and PySCF atom-subset consistency.
+        gradient = self.base._scf.nuc_grad_method().kernel()
+        return gradient if atmlst is None else gradient[list(atmlst)]
 
     def _analytic_components(self, xy, atmlst):
         tdobj = self.base
@@ -188,10 +184,7 @@ class Gradients(rhf_grad.GradientsBase):
                 self, tdobj, xy, **options,
             )
         if tdobj.deltaS == 1:
-            raise NotImplementedError(
-                "Analytic NTTDA gradients are not implemented for deltaS=1; "
-                "use method='finite_diff'."
-            )
+            return delta_s_plus_one.grad_elec(self, tdobj, xy, **options)
         raise ValueError("deltaS must be -1, 0, or 1")
 
     def grad_elec(self, xy, atmlst=None):
