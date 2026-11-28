@@ -251,7 +251,8 @@ def grad_elec(td_grad, x_y, atmlst=None, max_memory=2000, verbose=logger.INFO):
     return de
 
 
-def _contract_xc_kernel(td_grad, xc_code, dmvo, dmoo=None, with_vxc=True, with_kxc=True, max_memory=2000):
+def _contract_xc_kernel(td_grad, xc_code, dmvo, dmoo=None, with_vxc=True, with_kxc=True, max_memory=2000,
+                        dmvo_2=None):
     mol = td_grad.mol
     mf = td_grad.base._scf
     grids = mf.grids
@@ -266,6 +267,8 @@ def _contract_xc_kernel(td_grad, xc_code, dmvo, dmoo=None, with_vxc=True, with_k
     ao_loc = mol.ao_loc_nr()
 
     dmvo = (dmvo + dmvo.T) * 0.5
+    if dmvo_2 is not None:
+        dmvo_2 = (dmvo_2 + dmvo_2.T) * 0.5
 
     f1vo = np.zeros((4, nao, nao))
     deriv = 2
@@ -322,7 +325,12 @@ def _contract_xc_kernel(td_grad, xc_code, dmvo, dmoo=None, with_vxc=True, with_k
             fmat_(mol, f1vo, ao, wv, mask, shls_slice, ao_loc)
 
             if with_kxc:
-                wv = lib.einsum('xg,yg,xyczg,g->czg', rho1, rho1, 2 * kxc_sf, weight)
+                rho1_2 = rho1
+                if dmvo_2 is not None:
+                    rho1_2 = ni.eval_rho(mol, ao0, dmvo_2, mask, xctype, hermi=1, with_lapl=False)
+                    if xctype == 'LDA':
+                        rho1_2 = rho1_2[np.newaxis]
+                wv = lib.einsum('xg,yg,xyczg,g->czg', rho1, rho1_2, 2 * kxc_sf, weight)
                 fmat_(mol, k1ao[0], ao, wv[0], mask, shls_slice, ao_loc)
                 fmat_(mol, k1ao[1], ao, wv[1], mask, shls_slice, ao_loc)
 

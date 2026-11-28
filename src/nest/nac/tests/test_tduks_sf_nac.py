@@ -180,21 +180,16 @@ H      0.937704    0.100000   -0.513544
         _, diff = self._check_nac('B3LYP', False, B3LYP_REF_FULL)
         self.assertAlmostEqual(diff, 0, delta=1e-7)
 
-    def test_extype0_smoke(self):
-        mol = gto.M(
-            atom='O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587',
-            basis='sto-3g',
-            spin=2,
-            verbose=0,
-            output='/dev/null',
-        )
-        mf = dft.UKS(mol).set(xc='HF').run()
-        td = mf.TDDFT_SF().set(
-            extype=0, collinear='mcol', collinear_samples=20, nstates=3
-        ).run()
-        value = td.NAC().kernel(state_I=1, state_J=2, ediff=False, use_etfs=False)
-        self.assertEqual(value.shape, (mol.natm, 3))
-        self.assertTrue(np.isfinite(value).all())
+    def test_mcol_lda_tda(self):
+        mol = gto.M(atom='O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587',
+                    basis='6-31g', spin=2, verbose=0)
+        mf = mol.UKS(xc='SVWN').run()
+        td = mf.SFTDA().set(nstates=3).run()
+        self.assertTrue(mf.converged and all(td.converged))
+        de = td.NAC().kernel(state_I=1, state_J=3)
+        # Full NAC numerator from gpu4pyscf's SF-TDA water benchmark.
+        ref_de = np.array([[-0.016524445, 0., 0.], [0.0314787174, 0., 0.], [0.0314787174, 0., 0.]])
+        self.assertAlmostEqual(abs(abs(de) - abs(ref_de)).max(), 0, delta=1e-5)
 
     def test_extype1_call_flow(self):
         mol = gto.Mole()
