@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 # Ref:
-# J. Chem. Theory Comput. 2026
+# J. Chem. Theory Comput. 2026, 22, 6076
 #
 
 import copy
@@ -23,28 +23,27 @@ from functools import reduce
 
 import numpy as np
 
-from pyscf import lib
+from pyscf import gto, lib
 from pyscf.lib import logger
 from pyscf.scf import ucphf
-from pyscf.dft import numint2c
 from pyscf.grad import tdrhf as tdrhf_grad
-from pyscf.grad import tdrks as tdrks_grad
 from pyscf.grad import tduks as tduks_grad
-from nest.sftda.numint2c_sftd import mcfun_eval_xc_adapter_sf
+from nest.grad import tduks_sf as tduks_sf_grad
 
 
 def get_Hellmann_Feymann(td_grad, x_y_I, x_y_J, atmlst=None, max_memory=6000, verbose=logger.INFO,
                          state_I=None, state_J=None):
-    """
-    Electronic part of spin-flip TDA/TDDFT nuclear gradients.
+    """Return the energy-weighted, ETF-corrected coupling between two SF states."""
+    return _nac_terms(td_grad, x_y_I, x_y_J, atmlst, max_memory, verbose)[0]
 
-    Args:
-        td_grad : grad.tduks_sf.Gradients object.
 
-        x_y : a two-element list of numpy arrays
-            TDDFT X and Y amplitudes. If Y is set to 0, this function computes
-            TDA energy gradients.
-    """
+def nac_csf(td_grad, x_y_I, x_y_J, atmlst=None):
+    """Return the CSF overlap-derivative contribution without solving for the Z-vector."""
+    return _nac_terms(td_grad, x_y_I, x_y_J, atmlst, with_response=False)[1]
+
+
+def _nac_terms(td_grad, x_y_I, x_y_J, atmlst, max_memory=6000, verbose=logger.INFO, with_response=True):
+    """Return the Hellmann–Feynman numerator and the unscaled CSF contribution."""
     log = logger.new_logger(td_grad, verbose)
     time0 = logger.process_clock(), logger.perf_counter()
 
@@ -88,19 +87,24 @@ def get_Hellmann_Feymann(td_grad, x_y_I, x_y_J, atmlst=None, max_memory=6000, ve
     dvvb_IJ = lib.einsum('ia,ib->ab', x_I, x_J)
     dooa_IJ = -lib.einsum('ia,ja->ij', x_I, x_J)
     doob_IJ = -lib.einsum('ia,ja->ij', y_I, y_J)
-    dvva_JI = lib.einsum('ia,ib->ab', y_J, y_I)
-    dvvb_JI = lib.einsum('ia,ib->ab', x_J, x_I)
-    dooa_JI = -lib.einsum('ia,ja->ij', x_J, x_I)
-    doob_JI = -lib.einsum('ia,ja->ij', y_J, y_I)
-
     dmzooa_IJ = reduce(np.dot, (orboa, dooa_IJ, orboa.T))
     dmzooa_IJ += reduce(np.dot, (orbva, dvva_IJ, orbva.T))
     dmzoob_IJ = reduce(np.dot, (orbob, doob_IJ, orbob.T))
     dmzoob_IJ += reduce(np.dot, (orbvb, dvvb_IJ, orbvb.T))
-    dmzooa_JI = reduce(np.dot, (orboa, dooa_JI, orboa.T))
-    dmzooa_JI += reduce(np.dot, (orbva, dvva_JI, orbva.T))
-    dmzoob_JI = reduce(np.dot, (orbob, doob_JI, orbob.T))
-    dmzoob_JI += reduce(np.dot, (orbvb, dvvb_JI, orbvb.T))
+    # The antisymmetric density contributes only to the uncorrected NAC.
+    dm_csf = dmzooa_IJ - dmzoob_IJ if td_grad.base.extype == 0 else dmzoob_IJ - dmzooa_IJ
+    dm_csf = dm_csf.T - dm_csf
+    mf_grad = mf.nuc_grad_method()
+    s1 = mf_grad.get_ovlp(mol)
+    if atmlst is None:
+        atmlst = range(mol.natm)
+    offsetdic = mol.offset_nr_by_atom()
+    csf = np.empty((len(atmlst), 3))
+    for k, ia in enumerate(atmlst):
+        _, _, p0, p1 = offsetdic[ia]
+        csf[k] = lib.einsum('xpq,pq->x', s1[:, p0:p1], dm_csf[p0:p1]) * 0.5
+    if not with_response:
+        return None, csf
 
     dmx_I = reduce(np.dot, (orbvb, x_I.T, orboa.T))
     dmy_I = reduce(np.dot, (orbob, y_I, orbva.T))
@@ -109,15 +113,19 @@ def get_Hellmann_Feymann(td_grad, x_y_I, x_y_J, atmlst=None, max_memory=6000, ve
     dmt_I = dmx_I + dmy_I
     dmt_J = dmx_J + dmy_J
 
-    dmzooa = (dmzooa_IJ + dmzooa_JI) * 0.5
-    dmzoob = (dmzoob_IJ + dmzoob_JI) * 0.5
+    dmzooa = (dmzooa_IJ + dmzooa_IJ.T) * 0.5
+    dmzoob = (dmzoob_IJ + dmzoob_IJ.T) * 0.5
 
     ni = mf._numint
     ni.libxc.test_deriv_order(mf.xc, 3, raise_error=True)
     omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, mol.spin)
 
-    f1vo_I, f1oo, vxc1, k1ao = _contract_xc_kernel(td_grad, mf.xc, dmt_I, dmt_J, (dmzooa, dmzoob), True, True, max_memory)
-    f1vo_J, _, _, _ = _contract_xc_kernel(td_grad, mf.xc, dmt_J, dmt_I, (dmzooa, dmzoob), True, True, max_memory)
+    f1vo_I, f1oo, vxc1, k1ao = tduks_sf_grad._contract_xc_kernel(
+        td_grad, mf.xc, dmt_I, (dmzooa, dmzoob), dmvo_2=dmt_J, max_memory=max_memory,
+    )
+    f1vo_J = tduks_sf_grad._contract_xc_kernel(
+        td_grad, mf.xc, dmt_J, with_vxc=False, with_kxc=False, max_memory=max_memory,
+    )[0]
 
     with_k = ni.libxc.is_hybrid_xc(mf.xc)
     if with_k:
@@ -214,10 +222,10 @@ def get_Hellmann_Feymann(td_grad, x_y_I, x_y_J, atmlst=None, max_memory=6000, ve
     zeta_b[:noccb, noccb:] = mo_energy[1][noccb:]
     dm1a = np.zeros((nmoa, nmoa))
     dm1b = np.zeros((nmob, nmob))
-    dm1a[:nocca, :nocca] = (dooa_IJ + dooa_JI) * 0.5
-    dm1b[:noccb, :noccb] = (doob_IJ + doob_JI) * 0.5
-    dm1a[nocca:, nocca:] = (dvva_IJ + dvva_JI) * 0.5
-    dm1b[noccb:, noccb:] = (dvvb_IJ + dvvb_JI) * 0.5
+    dm1a[:nocca, :nocca] = (dooa_IJ + dooa_IJ.T) * 0.5
+    dm1b[:noccb, :noccb] = (doob_IJ + doob_IJ.T) * 0.5
+    dm1a[nocca:, nocca:] = (dvva_IJ + dvva_IJ.T) * 0.5
+    dm1b[noccb:, noccb:] = (dvvb_IJ + dvvb_IJ.T) * 0.5
     dm1a[nocca:, :nocca] = z1a * 2
     dm1b[noccb:, :noccb] = z1b * 2
 
@@ -225,9 +233,7 @@ def get_Hellmann_Feymann(td_grad, x_y_I, x_y_J, atmlst=None, max_memory=6000, ve
     im0b = reduce(np.dot, (mo_coeff[1], im0b + zeta_b * dm1b, mo_coeff[1].T))
     im0 = im0a + im0b
 
-    mf_grad = td_grad.base._scf.nuc_grad_method()
     hcore_deriv = mf_grad.hcore_generator(mol)
-    s1 = mf_grad.get_ovlp(mol)
 
     dmz1dooa = 4 * z1ao[0] + 2 * dmzooa
     dmz1doob = 4 * z1ao[1] + 2 * dmzoob
@@ -263,9 +269,6 @@ def get_Hellmann_Feymann(td_grad, x_y_I, x_y_J, atmlst=None, max_memory=6000, ve
     veff1a, veff1b = veff1
     time1 = log.timer('2e AO integral derivatives', *time1)
 
-    if atmlst is None:
-        atmlst = range(mol.natm)
-    offsetdic = mol.offset_nr_by_atom()
     de = np.zeros((len(atmlst), 3))
 
     for k, ia in enumerate(atmlst):
@@ -296,251 +299,36 @@ def get_Hellmann_Feymann(td_grad, x_y_I, x_y_J, atmlst=None, max_memory=6000, ve
             de[k] += lib.einsum('xpq,pq->x', vk1_I[1, :, p0:p1], dmt_J.T[p0:p1])
             de[k] += lib.einsum('xpq,pq->x', vk1_J[1, :, p0:p1], dmt_I.T[p0:p1])
 
-    log.timer('TDUKS nuclear gradients', *time0)
-    return de
+    log.timer('SF-TDDFT nonadiabatic coupling', *time0)
+    return de, csf
 
 
-def _contract_xc_kernel(td_grad, xc_code, dmvo_I, dmvo_J, dmoo=None, with_vxc=True, with_kxc=True, max_memory=2000):
-    mol = td_grad.mol
-    mf = td_grad.base._scf
-    grids = mf.grids
-
-    ni = mf._numint
-    xctype = ni._xc_type(xc_code)
-
-    mo_coeff = mf.mo_coeff
-    mo_occ = mf.mo_occ
-    nao = mo_coeff[0].shape[0]
-    shls_slice = (0, mol.nbas)
-    ao_loc = mol.ao_loc_nr()
-    dmvo_I = (dmvo_I + dmvo_I.T) * 0.5
-    dmvo_J = (dmvo_J + dmvo_J.T) * 0.5
-
-    f1vo = np.zeros((4, nao, nao))
-    deriv = 2
-    if dmoo is not None:
-        f1oo = np.zeros((2, 4, nao, nao))
-    else:
-        f1oo = None
-    if with_vxc:
-        v1ao = np.zeros((2, 4, nao, nao))
-    else:
-        v1ao = None
-    if with_kxc:
-        k1ao = np.zeros((2, 4, nao, nao))
-        deriv = 3
-    else:
-        k1ao = None
-
-    if xctype == 'HF':
-        return f1vo, f1oo, v1ao, k1ao
-    elif xctype == 'LDA':
-        fmat_, ao_deriv = tdrks_grad._lda_eval_mat_, 1
-    elif xctype == 'GGA':
-        fmat_, ao_deriv = tdrks_grad._gga_eval_mat_, 2
-    elif xctype == 'MGGA':
-        fmat_, ao_deriv = tdrks_grad._mgga_eval_mat_, 2
-        logger.warn(td_grad, 'TDUKS-MGGA Gradients may be inaccurate due to grids response')
-    else:
-        raise NotImplementedError(f'td-uks for functional {xc_code}')
-
-    if td_grad.base.collinear == 'mcol':
-        nimc = numint2c.NumInt2C()
-        nimc.collinear = 'mcol'
-        nimc.collinear_samples = td_grad.base.collinear_samples
-        eval_xc_eff = mcfun_eval_xc_adapter_sf(nimc, xc_code)
-
-    for ao, mask, weight, coords in ni.block_loop(mol, grids, nao, ao_deriv, max_memory):
-        ao0 = ao[0] if xctype == 'LDA' else ao
-        rho = (
-            ni.eval_rho2(mol, ao0, mo_coeff[0], mo_occ[0], mask, xctype, with_lapl=False),
-            ni.eval_rho2(mol, ao0, mo_coeff[1], mo_occ[1], mask, xctype, with_lapl=False),
-        )
-        if td_grad.base.collinear == 'mcol':
-            rho_z = np.array([rho[0] + rho[1], rho[0] - rho[1]])
-            fxc_sf, kxc_sf = eval_xc_eff(xc_code, rho_z, deriv, xctype=xctype)[2:4]
-            kxc_sf = np.stack(
-                (kxc_sf[:, :, 0] + kxc_sf[:, :, 1], kxc_sf[:, :, 0] - kxc_sf[:, :, 1]), axis=2
-            )
-            rho1_I = ni.eval_rho(mol, ao0, dmvo_I, mask, xctype, hermi=1, with_lapl=False)
-            if xctype == 'LDA':
-                rho1_I = rho1_I[np.newaxis]
-            wv = lib.einsum('yg,xyg,g->xg', rho1_I, 2 * fxc_sf, weight)
-            fmat_(mol, f1vo, ao, wv, mask, shls_slice, ao_loc)
-
-            if with_kxc:
-                rho1_J = ni.eval_rho(mol, ao0, dmvo_J, mask, xctype, hermi=1, with_lapl=False)
-                if xctype == 'LDA':
-                    rho1_J = rho1_J[np.newaxis]
-                wv = lib.einsum('xg,yg,xyczg,g->czg', rho1_I, rho1_J, 2 * kxc_sf, weight)
-                fmat_(mol, k1ao[0], ao, wv[0], mask, shls_slice, ao_loc)
-                fmat_(mol, k1ao[1], ao, wv[1], mask, shls_slice, ao_loc)
-
-        if dmoo is not None or with_vxc:
-            vxc, fxc = ni.eval_xc_eff(xc_code, rho, deriv=2, spin=1)[1:3]
-
-        if dmoo is not None:
-            rho2 = np.asarray(
-                (
-                    ni.eval_rho(mol, ao0, dmoo[0], mask, xctype, hermi=1, with_lapl=False),
-                    ni.eval_rho(mol, ao0, dmoo[1], mask, xctype, hermi=1, with_lapl=False),
-                )
-            )
-            if xctype == 'LDA':
-                rho2 = rho2[:, np.newaxis]
-            wv = lib.einsum('axg,axbyg,g->byg', rho2, fxc, weight)
-            fmat_(mol, f1oo[0], ao, wv[0], mask, shls_slice, ao_loc)
-            fmat_(mol, f1oo[1], ao, wv[1], mask, shls_slice, ao_loc)
-
-        if with_vxc:
-            wv = vxc * weight
-            fmat_(mol, v1ao[0], ao, wv[0], mask, shls_slice, ao_loc)
-            fmat_(mol, v1ao[1], ao, wv[1], mask, shls_slice, ao_loc)
-
-    f1vo[1:] *= -1
-    if f1oo is not None:
-        f1oo[:, 1:] *= -1
-    if v1ao is not None:
-        v1ao[:, 1:] *= -1
-    if k1ao is not None:
-        k1ao[:, 1:] *= -1
-    return f1vo, f1oo, v1ao, k1ao
+def as_scanner(nac):
+    """Return a scanner that evaluates this NAC at each supplied geometry."""
+    if isinstance(nac, lib.GradScanner):
+        return nac
+    name = nac.__class__.__name__ + NACScanner.__name_mixin__
+    return lib.set_class(NACScanner(nac), (NACScanner, nac.__class__), name)
 
 
-def nac_csf(td_grad, x_y_I, x_y_J, atmlst=None):
-    '''
-    Compute the CSF (Configuration State Function) contribution to non-adiabatic coupling vectors (NACVs)
-    between two spin-flip excited states.
+class NACScanner(lib.GradScanner):
+    def __call__(self, mol_or_geom, **kwargs):
+        if isinstance(mol_or_geom, gto.MoleBase):
+            mol = mol_or_geom
+        else:
+            mol = self.mol.set_geom_(mol_or_geom, inplace=False)
+        if mol.nao != self.mol.nao or mol.nelec != self.mol.nelec:
+            self.reset_phase()
+        self.base(mol)
+        self.mol = mol
+        return self.kernel(**kwargs)
 
-    This term arises from the explicit nuclear coordinate dependence of the electronic wavefunctions
-    (i.e., the derivative of the CI coefficients), and is necessary for reconstructing the full NACV
-    consistent with finite-difference calculations.
-
-    Important: This term breaks translational invariance and is NOT ETF-corrected.
-    Including it will make the total NACV inconsistent with momentum conservation,
-    but essential for matching finite-difference benchmarks.
-
-    Args:
-        td_grad:
-            Gradient object associated with SF-TDA or SF-TDDFT calculation.
-            Must contain molecular structure and orbital information.
-    Returns:
-        numpy.ndarray:
-            CSF contribution to the NAC vector between states I and J.
-            Shape: (natm, 3), in atomic units.
-            Not ETF-corrected — use with caution in dynamics simulations.
-
-    Notes:
-        - This term + `get_Hellmann_Feynman` = Full NACV (matches finite difference).
-        - The name "CSF" refers to the fact that this term originates from the derivative
-          of the CI coefficients in the configuration state function basis.
-    '''
-    mol = td_grad.mol
-    mf = td_grad.base._scf
-
-    mo_coeff = mf.mo_coeff
-    mo_occ = mf.mo_occ
-    occidxa = np.where(mo_occ[0] > 0)[0]
-    occidxb = np.where(mo_occ[1] > 0)[0]
-    viridxa = np.where(mo_occ[0] == 0)[0]
-    viridxb = np.where(mo_occ[1] == 0)[0]
-    nocca = len(occidxa)
-    noccb = len(occidxb)
-    nvira = len(viridxa)
-    nvirb = len(viridxb)
-    orboa = mo_coeff[0][:, occidxa]
-    orbob = mo_coeff[1][:, occidxb]
-    orbva = mo_coeff[0][:, viridxa]
-    orbvb = mo_coeff[1][:, viridxb]
-    mo_coeff[0].shape[0]
-
-    nocca + nvira
-    noccb + nvirb
-
-    if td_grad.base.extype == 0:
-        x_ab_I, y_ba_I = x_y_I
-        x_ab_J, y_ba_J = x_y_J
-        if not isinstance(y_ba_I, np.ndarray):
-            y_ba_I = np.zeros((nocca, nvirb))
-        if not isinstance(y_ba_J, np.ndarray):
-            y_ba_J = np.zeros((nocca, nvirb))
-        x_ab_I = x_ab_I.T
-        x_ba_I = (-y_ba_I).T
-        x_ab_J = x_ab_J.T
-        x_ba_J = y_ba_J.T
-        dvv_a_IJ = np.einsum('ai,bi->ab', x_ab_I, x_ab_J)
-
-        dvv_b_IJ = np.einsum('ai,bi->ab', x_ba_I, x_ba_J)
-
-        doo_b_IJ = np.einsum('ai,aj->ij', x_ab_I, x_ab_J)
-
-        doo_a_IJ = np.einsum('ai,aj->ij', x_ba_I, x_ba_J)
-
-        dmzoo_a_IJ = reduce(np.dot, (orboa, doo_a_IJ, orboa.T))
-
-        dmzoo_b_IJ = reduce(np.dot, (orbob, doo_b_IJ, orbob.T))
-
-        dmzoo_a_IJ += reduce(np.dot, (orbva, dvv_a_IJ, orbva.T))
-
-        dmzoo_b_IJ += reduce(np.dot, (orbvb, dvv_b_IJ, orbvb.T))
-    elif td_grad.base.extype == 1:
-        x_ba_I, y_ab_I = x_y_I
-        x_ba_J, y_ab_J = x_y_J
-        if not isinstance(y_ab_I, np.ndarray):
-            y_ab_I = np.zeros((noccb, nvira))
-        if not isinstance(y_ab_J, np.ndarray):
-            y_ab_J = np.zeros((noccb, nvira))
-        x_ab_I = (-y_ab_I).T
-        x_ba_I = x_ba_I.T
-        x_ab_J = y_ab_J.T
-        x_ba_J = x_ba_J.T
-        dvv_a_IJ = np.einsum('ai,bi->ab', x_ab_I, x_ab_J)
-
-        dvv_b_IJ = np.einsum('ai,bi->ab', x_ba_I, x_ba_J)
-
-        doo_b_IJ = np.einsum('ai,aj->ij', x_ab_I, x_ab_J)
-
-        doo_a_IJ = np.einsum('ai,aj->ij', x_ba_I, x_ba_J)
-
-        dmzoo_a_IJ = reduce(np.dot, (orboa, doo_a_IJ, orboa.T))
-
-        dmzoo_b_IJ = reduce(np.dot, (orbob, doo_b_IJ, orbob.T))
-
-        dmzoo_a_IJ += reduce(np.dot, (orbva, dvv_a_IJ, orbva.T))
-
-        dmzoo_b_IJ += reduce(np.dot, (orbvb, dvv_b_IJ, orbvb.T))
-
-    mf_grad = td_grad.base._scf.nuc_grad_method()
-    s1 = mf_grad.get_ovlp(mol)
-    if atmlst is None:
-        atmlst = range(mol.natm)
-    offsetdic = mol.offset_nr_by_atom()
-    nac_csf = np.zeros((len(atmlst), 3))
-    for k, ia in enumerate(atmlst):
-        shl0, shl1, p0, p1 = offsetdic[ia]
-        nac_csf[k] -= np.einsum('xpq,pq->x', s1[:, p0:p1], dmzoo_a_IJ[p0:p1]) * 0.5
-        nac_csf[k] -= np.einsum('xpq,pq->x', s1[:, p0:p1], dmzoo_b_IJ[p0:p1]) * 0.5
-        nac_csf[k] += np.einsum('xqp,pq->x', s1[:, p0:p1], dmzoo_a_IJ[:, p0:p1]) * 0.5
-        nac_csf[k] += np.einsum('xqp,pq->x', s1[:, p0:p1], dmzoo_b_IJ[:, p0:p1]) * 0.5
-    return nac_csf
-
-
-def as_scanner(NACClass):
-    class Scanner(NACClass):
-        def __call__(self, mol):
-            td_obj = self.base
-            mf_obj = td_obj._scf
-            if np.allclose(mf_obj.mol.atom_coords(), mol.atom_coords()):
-                return self.kernel()
-
-            logger.info(self, 'New geometry detected. Recalculating SCF and TDDFT.')
-            mf_obj.reset(mol)
-            mf_obj.kernel()
-            td_obj.reset(mol)
-            td_obj.kernel()
-            return self.kernel()
-
-    return Scanner
+    @property
+    def converged(self):
+        if self.state_I is None or self.state_J is None or self.base.converged is None:
+            return False
+        return (self.base._scf.converged and self.base.converged[self.state_I - 1]
+                and self.base.converged[self.state_J - 1])
 
 
 def _dot_amplitude_block(a, b):
@@ -566,6 +354,7 @@ class NonAdiabaticCouplings(tdrhf_grad.Gradients):
         self.use_etfs = False
         self.x_y_I_prev = None
         self.x_y_J_prev = None
+        self._phase_states = None
         self._keys = self._keys.union({'state_I', 'state_J', 'ediff', 'use_etfs'})
 
     def dump_flags(self, verbose=None):
@@ -596,30 +385,33 @@ class NonAdiabaticCouplings(tdrhf_grad.Gradients):
 
         if state_I is None or state_J is None:
             raise RuntimeError('state_I and state_J must be specified')
+        if self.base.xy is None:
+            raise RuntimeError('Run the spin-flip TD calculation before requesting a NAC')
+        nstates = len(self.base.xy)
+        for state in (state_I, state_J):
+            if not isinstance(state, (int, np.integer)) or isinstance(state, bool) or not 1 <= state <= nstates:
+                raise ValueError(f'Expected an excited-state index from 1 to {nstates}, got {state!r}')
+        if state_I == state_J:
+            raise ValueError('state_I and state_J must be different')
 
         raw_x_y_I = self.base.xy[state_I - 1]
         raw_x_y_J = self.base.xy[state_J - 1]
         e_I = self.base.e[state_I - 1]
         e_J = self.base.e[state_J - 1]
 
-        if self.x_y_I_prev is not None and self._vector_dot(raw_x_y_I, self.x_y_I_prev) < 0:
-            logger.debug(self, 'Flipping sign of state I due to phase change.')
-            raw_x_y_I = self._scale_vector(raw_x_y_I, -1.0)
+        if self._phase_states == (state_I, state_J):
+            if self._vector_dot(raw_x_y_I, self.x_y_I_prev) < 0:
+                raw_x_y_I = self._scale_vector(raw_x_y_I, -1.0)
+            if self._vector_dot(raw_x_y_J, self.x_y_J_prev) < 0:
+                raw_x_y_J = self._scale_vector(raw_x_y_J, -1.0)
+
+        hf_term, csf = _nac_terms(self, raw_x_y_I, raw_x_y_J, atmlst)
+        self._phase_states = (state_I, state_J)
         self.x_y_I_prev = copy.deepcopy(raw_x_y_I)
-
-        if self.x_y_J_prev is not None and self._vector_dot(raw_x_y_J, self.x_y_J_prev) < 0:
-            logger.debug(self, 'Flipping sign of state J due to phase change.')
-            raw_x_y_J = self._scale_vector(raw_x_y_J, -1.0)
         self.x_y_J_prev = copy.deepcopy(raw_x_y_J)
-
-        hf_term = get_Hellmann_Feymann(self, raw_x_y_I, raw_x_y_J, atmlst=atmlst, state_I=state_I, state_J=state_J)
-        if use_etfs:
-            nac = hf_term
-        else:
-            nac = hf_term + nac_csf(self, raw_x_y_I, raw_x_y_J, atmlst) * (e_J - e_I)
-
+        delta_e = e_J - e_I
+        nac = hf_term if use_etfs else hf_term + csf * delta_e
         if ediff:
-            delta_e = e_J - e_I
             if abs(delta_e) < 1e-10:
                 logger.warn(self, 'Energy difference is very small: %s. NAC not divided.', delta_e)
             else:
@@ -627,28 +419,23 @@ class NonAdiabaticCouplings(tdrhf_grad.Gradients):
         return nac
 
     def kernel(self, state_I=None, state_J=None, atmlst=None, ediff=None, use_etfs=None, use_cache=True):
+        if atmlst is None:
+            atmlst = self.atmlst
+        self.nac = self.compute_nac(state_I, state_J, atmlst, ediff, use_etfs, use_cache)
         if state_I is not None:
             self.state_I = state_I
         if state_J is not None:
             self.state_J = state_J
-        if atmlst is not None:
-            self.atmlst = atmlst
+        self.atmlst = atmlst
         if ediff is not None:
             self.ediff = ediff
         if use_etfs is not None:
             self.use_etfs = use_etfs
 
-        self.nac = self.compute_nac(
-            state_I=self.state_I,
-            state_J=self.state_J,
-            atmlst=getattr(self, 'atmlst', None),
-            ediff=self.ediff,
-            use_etfs=self.use_etfs,
-            use_cache=use_cache,
-        )
         return self.nac
 
     def reset_phase(self):
+        self._phase_states = None
         self.x_y_I_prev = None
         self.x_y_J_prev = None
         return self

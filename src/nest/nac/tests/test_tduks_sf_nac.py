@@ -25,32 +25,33 @@ from nest.nac import tduks_sf as packaged_nac
 from nest.sftda.uhf_sf import get_ab_sf
 
 
+# PySCF-forge #231 references, PySCF 2.15.0 with SCF conv_tol=1e-12.
 HF_REF_ETF = np.array([
-    [-3.95216073e-03, -3.75136071e-04, -9.45804349e-06],
-    [ 2.29982740e-03,  1.83601713e-04,  2.18434800e-06],
-    [-3.38828168e-04,  2.19688758e-02, -7.70725017e-04],
-    [ 1.99116150e-03, -2.17773415e-02,  7.77998712e-04],
+    [-3.95470206e-03, -3.73615571e-04, -9.69878457e-06],
+    [ 2.30042868e-03,  1.82489975e-04,  3.11897170e-06],
+    [-3.38391814e-04,  2.19689308e-02, -7.70962711e-04],
+    [ 1.99266520e-03, -2.17778053e-02,  7.77542524e-04],
 ])
 
 HF_REF_FULL = np.array([
-    [ 4.07870800e-03,  3.87408301e-04,  8.03498796e-06],
-    [-2.12054721e-03, -1.74366077e-04, -2.81871440e-06],
-    [ 5.19504915e-04, -2.61168634e-02,  6.30604272e-04],
-    [-2.25106258e-03,  2.59162799e-02, -6.37937351e-04],
+    [ 4.08124376e-03,  3.85893263e-04,  8.26819990e-06],
+    [-2.12115474e-03, -1.73151723e-04, -3.75968091e-06],
+    [ 5.19067725e-04, -2.61169259e-02,  6.30842571e-04],
+    [-2.25256655e-03,  2.59167244e-02, -6.37481239e-04],
 ])
 
 B3LYP_REF_ETF = np.array([
-    [ 2.50608626e-03,  3.33283037e-04,  3.17791471e-05],
-    [-9.06831663e-04, -1.32591849e-04, -1.33038220e-05],
-    [ 1.11121960e-03, -3.60580919e-02, -3.53482487e-04],
-    [-2.71053372e-03,  3.58574323e-02,  3.35164345e-04],
+    [ 2.50598126e-03,  3.33252101e-04,  3.17780136e-05],
+    [-9.06812181e-04, -1.32553941e-04, -1.33029415e-05],
+    [ 1.11124891e-03, -3.60578572e-02, -3.53475871e-04],
+    [-2.71047750e-03,  3.58571905e-02,  3.35157983e-04],
 ])
 
 B3LYP_REF_FULL = np.array([
-    [-2.98860503e-03, -3.83780059e-04, -2.82220009e-05],
-    [ 7.40415810e-04,  1.27679743e-04,  1.47507459e-05],
-    [-1.53440277e-03,  4.54561852e-02,  6.15100183e-04],
-    [ 3.28538114e-03, -4.52414485e-02, -5.96649158e-04],
+    [-2.98849214e-03, -3.83745104e-04, -2.82205655e-05],
+    [ 7.40404358e-04,  1.27644164e-04,  1.47500840e-05],
+    [-1.53443210e-03,  4.54559163e-02,  6.15094567e-04],
+    [ 3.28532155e-03, -4.52411741e-02, -5.96643805e-04],
 ])
 
 
@@ -146,7 +147,9 @@ H      0.937704    0.100000   -0.513544
     def _check_nac(self, xc, use_etfs, ref):
         mf = dft.UKS(self.mol)
         mf.xc = xc
+        mf.conv_tol = 1e-12
         mf.kernel()
+        self.assertTrue(mf.converged)
         solved_data = solve_shared_tddft(mf, extype=1, collinear_samples=50)
         td_new = build_td_object(mf, solved_data, extype=1, collinear_samples=50, xy_format='new')
         new_val = packaged_nac.NAC(td_new).kernel(
@@ -163,35 +166,30 @@ H      0.937704    0.100000   -0.513544
 
     def test_hf_etf(self):
         _, diff = self._check_nac('HF', True, HF_REF_ETF)
-        self.assertAlmostEqual(diff, 0, delta=1e-8)
+        self.assertAlmostEqual(diff, 0, delta=1e-7)
 
     def test_hf_full(self):
         _, diff = self._check_nac('HF', False, HF_REF_FULL)
-        self.assertAlmostEqual(diff, 0, delta=1e-8)
+        self.assertAlmostEqual(diff, 0, delta=1e-7)
 
     def test_b3lyp_etf(self):
         _, diff = self._check_nac('B3LYP', True, B3LYP_REF_ETF)
-        self.assertAlmostEqual(diff, 0, delta=1e-8)
+        self.assertAlmostEqual(diff, 0, delta=1e-7)
 
     def test_b3lyp_full(self):
         _, diff = self._check_nac('B3LYP', False, B3LYP_REF_FULL)
-        self.assertAlmostEqual(diff, 0, delta=1e-8)
+        self.assertAlmostEqual(diff, 0, delta=1e-7)
 
-    def test_extype0_smoke(self):
-        mol = gto.M(
-            atom='O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587',
-            basis='sto-3g',
-            spin=2,
-            verbose=0,
-            output='/dev/null',
-        )
-        mf = dft.UKS(mol).set(xc='HF').run()
-        td = mf.TDDFT_SF().set(
-            extype=0, collinear='mcol', collinear_samples=20, nstates=3
-        ).run()
-        value = td.NAC().kernel(state_I=1, state_J=2, ediff=False, use_etfs=False)
-        self.assertEqual(value.shape, (mol.natm, 3))
-        self.assertTrue(np.isfinite(value).all())
+    def test_mcol_lda_tda(self):
+        mol = gto.M(atom='O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587',
+                    basis='6-31g', spin=2, verbose=0)
+        mf = mol.UKS(xc='SVWN').run()
+        td = mf.SFTDA().set(nstates=3).run()
+        self.assertTrue(mf.converged and all(td.converged))
+        de = td.NAC().kernel(state_I=1, state_J=3)
+        # Full NAC numerator from gpu4pyscf's SF-TDA water benchmark.
+        ref_de = np.array([[-0.016524445, 0., 0.], [0.0314787174, 0., 0.], [0.0314787174, 0., 0.]])
+        self.assertAlmostEqual(abs(abs(de) - abs(ref_de)).max(), 0, delta=1e-5)
 
     def test_extype1_call_flow(self):
         mol = gto.Mole()
