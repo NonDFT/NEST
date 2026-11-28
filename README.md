@@ -50,7 +50,7 @@ Noncollinear TDDFT         Noncollinear SF-TDDFT      Noncollinear Tensor TDA
 
   NT-TDA is a spin-consistent extension of noncollinear TDDFT that provides a unified treatment of spin-conserving and spin-flip excitations. For an open-shell reference state with total spin S, it can describe target states with total spins S−1 (except for S = 1/2), S, and S+1. All resulting states are free from spin contamination.
 
-  - Analytic gradients for ΔS = −1 and 0 on ROKS and average-occupation ROKS (AOCSCF) references
+  - [Analytic gradients for ΔS = −1, 0, +1](examples/nttda/02_nttda_aocscf_grad.py) on ROKS and AOCSCF references, including a [doublet-to-quartet input for N₂⁺](examples/nttda/08_n2plus_quartet_gradient.py)
   - Finite-difference gradients for all three spin channels
   - Oscillator strengths
   - NADC *(in progress)*

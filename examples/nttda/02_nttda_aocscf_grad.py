@@ -18,15 +18,16 @@ NTTDA excited-state gradients on an AOCSCF (average-occupation) reference.
 
 An AOCSCF reference gives a common average-occupation orbital set for every
 spin channel.  NTTDA built on that reference can target the same-spin channel
-(``deltaS=0``) and the spin-lowering channel (``deltaS=-1``); the total state
+(``deltaS=0``), the spin-lowering channel (``deltaS=-1``), and the spin-raising
+channel (``deltaS=+1``); the total state
 energy is the high-spin reference energy plus the NTTDA excitation energy, so
 its gradient is the sum of the reference gradient and the excitation-energy
 gradient.
 
 ``td.Gradients().kernel(state=n)`` returns the analytic gradient of
 ``E_reference + omega_n`` for state ``n`` (1 for the lowest root); ``state=0``
-returns the reference gradient.  Analytic gradients are available for
-``deltaS = -1`` and ``0``; ``deltaS = +1`` uses ``method='finite_diff'``.
+returns the reference gradient.  Analytic gradients are available for all
+three channels; ``method='finite_diff'`` provides an independent check.
 '''
 
 from pyscf import gto
@@ -48,7 +49,7 @@ mf.grids.prune = None
 mf.small_rho_cutoff = 0.0
 mf.kernel()
 
-for delta_s in (-1, 0):
+for delta_s in (-1, 0, 1):
     td = mf.NTTDA().set(
         deltaS=delta_s,     # Sf = Si + deltaS
         nstates=3,
